@@ -10,10 +10,8 @@ In IV regression, our goal is to use $\boldsymbol{x} \in \mathbb{R}^{d_x}$ to re
 The general formulation of IV regression is
 
 ```math
-\begin{aligned}
-y &= g(\boldsymbol{\theta}_{*}; \boldsymbol{x}) + \varepsilon_y, \\
-\boldsymbol{x} &= \boldsymbol{h}(\gamma_{*} ; \boldsymbol{z}) + \boldsymbol{\varepsilon}_{\boldsymbol{x}},
-\end{aligned}
+y = g(\boldsymbol{\theta}_{*}; \boldsymbol{x}) + \varepsilon_y, \\
+\boldsymbol{x} = \boldsymbol{h}(\gamma_{*} ; \boldsymbol{z}) + \boldsymbol{\varepsilon}_{\boldsymbol{x}},
 ```
 
 where $g(\boldsymbol{\theta}_{*}; \cdot)$ is the true model with parameter $\boldsymbol{\theta}_{*} \in \mathbb{R}^{d_\theta}$, $\varepsilon_y \in \mathbb{R}$ and $\boldsymbol{\varepsilon}_{\boldsymbol{x}} \in \mathbb{R}^{d_x}$ are noises, $\boldsymbol{z} \in \mathbb{R}^{d_z}$ is the instrumental variable that is uncorrelated with both $\varepsilon_y$ and $\boldsymbol{\varepsilon}_{\boldsymbol{x}}$, and $\boldsymbol{h}(\gamma_{*}; \cdot)$ is the true model between $\boldsymbol{x}$ and $\boldsymbol{z}$.
@@ -22,10 +20,8 @@ It should be noted that the explanatory variable $\boldsymbol{x}$ is **correlate
 For simulation, we explicitly represent the endogeneity (correlation between $\boldsymbol{x}$ and $\varepsilon_{Y}$) and formulate the problem as follows
 
 ```math
-\begin{aligned}
-y &= g(\boldsymbol{\theta}_{*}; \boldsymbol{x}) + u(\boldsymbol{c}) + \tilde{\varepsilon}_y, \\
-\boldsymbol{x} &= \boldsymbol{h}(\gamma_{*} ; \boldsymbol{z}) + v(\boldsymbol{c}) + \tilde{\boldsymbol{\varepsilon}}_{\boldsymbol{x}},
-\end{aligned}
+y = g(\boldsymbol{\theta}_{*}; \boldsymbol{x}) + u(\boldsymbol{c}) + \tilde{\varepsilon}_y, \\
+\boldsymbol{x} = \boldsymbol{h}(\gamma_{*} ; \boldsymbol{z}) + v(\boldsymbol{c}) + \tilde{\boldsymbol{\varepsilon}}_{\boldsymbol{x}},
 ```
 
 where $\tilde{\varepsilon}_y$ is the true noise and is uncorrelated with $\boldsymbol{x}$.
