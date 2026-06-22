@@ -9,10 +9,8 @@ This repository contains implementations of several recent methods for instrumen
 In IV regression, our goal is to use $\boldsymbol{x} \in \mathbb{R}^{d_x}$ to regress $y \in \mathbb{R}$.
 The general formulation of IV regression is
 
-$
-y = g(\boldsymbol{\theta}_*; \boldsymbol{x}) + \varepsilon_y, \\
-\boldsymbol{x} = \boldsymbol{h}(\gamma_* ; \boldsymbol{z}) + \boldsymbol{\varepsilon}_{\boldsymbol{x}},
-$
+$y = g(\boldsymbol{\theta}_*; \boldsymbol{x}) + \varepsilon_y, \\
+\boldsymbol{x} = \boldsymbol{h}(\gamma_* ; \boldsymbol{z}) + \boldsymbol{\varepsilon}_{\boldsymbol{x}},$
 
 where $g(\boldsymbol{\theta}_*; \cdot)$ is the true model with parameter $\boldsymbol{\theta}_* \in \mathbb{R}^{d_\theta}$, $\varepsilon_y \in \mathbb{R}$ and $\boldsymbol{\varepsilon_x} \in \mathbb{R}^{d_x}$ are noises, $\boldsymbol{z} \in \mathbb{R}^{d_z}$ is the instrumental variable that is uncorrelated with both $\varepsilon_y$ and $\boldsymbol{\varepsilon_x}$, and $\boldsymbol{h}(\gamma_*; \cdot)$ is the true model between $\boldsymbol{x}$ and $\boldsymbol{z}$.
 It should be noted that the explanatory variable $\boldsymbol{x}$ is **correlated** with $\varepsilon_y$, and consequently, conventional regression methods such as least squares generally fail.
