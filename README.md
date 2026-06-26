@@ -45,10 +45,34 @@ The update is calculated by
 
 where $`\boldsymbol{x}_{t}`$ and $`\boldsymbol{x}_{t}'`$ are independently observed from the same $`\boldsymbol{z}_{t}`$ (conditionally independent).
 
+
+### OSTG-IVaR
+OSTG-IVaR (Algorithm 2 in [Chen et al. 2024](https://arxiv.org/abs/2405.19463)) uses one-sample oracle to perform stochastic gradient descent.
+The update is calculated by
+
+```math
+\boldsymbol{\theta}_{t+1} = \boldsymbol{\theta}_{t} - \alpha_{t+1} \left( g(\boldsymbol{\theta}_{t}; \boldsymbol{h}(\boldsymbol{\gamma}_{t} ; \boldsymbol{z}_{t})) - y_{t} \right) \nabla_{\theta} g(\boldsymbol{\theta}_{t} ; \boldsymbol{h}(\boldsymbol{\gamma}_{t} ; \boldsymbol{z}_{t})), \\
+\boldsymbol{\gamma}_{t+1} = \boldsymbol{\gamma}_{t} - \beta_{t+1}  \nabla_{\gamma} \boldsymbol{h}(\boldsymbol{\gamma}_{t} ; \boldsymbol{z}_{t})^\top \left( \boldsymbol{h}(\boldsymbol{\gamma}_{t} ; \boldsymbol{z}_{t}) - \boldsymbol{x}_{t} \right),
+```
+In this algorithm, we only need one pair of data $`(\boldsymbol{z}_{t}, \boldsymbol{x}_{t}, y_{t})`$ at each step, and we use the current estimate of $`\boldsymbol{x}_{t}`$ with $`\boldsymbol{h}(\boldsymbol{\gamma}_{t}; \boldsymbol{z}_{t})`$, just like the two-stage least squares (2SLS) method.
+
 ### First-Order SLIM
 
 First-Order SLIM (Algorithm 1 in [Chen et al. 2025](https://arxiv.org/abs/2510.20996)) solves IV regression from the perspective of the Generalized Methods of Moments (GMM).
 The update is calculated by
+
+```math
+\boldsymbol{\theta}_{t+1} = \boldsymbol{\theta}_{t} - \alpha_{t+1} \tilde{M}_{B_M}(\boldsymbol{\theta}_t)^\top W \tilde{m}_{B_m}(\boldsymbol{\theta}_t),
+```
+
+where
+
+```math
+\tilde{M}_{B_M}(\boldsymbol{\theta}) = \frac{1}{B_M} \sum_{i=1}^{B_M} \boldsymbol{z}_i \nabla_{\theta} g(\boldsymbol{\theta} ; \boldsymbol{x}_{i})^\top, \\
+\tilde{m}_{B_m}(\boldsymbol{\theta}) = \frac{1}{B_m} \sum_{j=1}^{B_m} \boldsymbol{z}_i \left(g(\boldsymbol{\theta}; \boldsymbol{x}_i) - y_i\right) , \\
+```
+
+In the streaming setting ($`B_M = B_m = 1 `$), the update is calculated by
 
 ```math
 \boldsymbol{\theta}_{t+1} = \boldsymbol{\theta}_{t} - \alpha_{t+1} \bigl( g(\boldsymbol{\theta}_{t}; \boldsymbol{x}_{t,1}) - y_{t,1} \bigr) \nabla_{\theta} g(\boldsymbol{\theta}_{t} ; \boldsymbol{x}_{t,2}) \; \boldsymbol{z}_{t,1}^\top W \boldsymbol{z}_{t,2},
