@@ -41,21 +41,34 @@ class BaseIVAlgorithm:
         config: SimulationConfig,
         model: BaseModel | None = None,
         seed: int | None = None,
+        init_theta: np.ndarray | None = None,
     ):
         """
         Args:
             config: simulation configuration.
             model: structural model instance (defaults to config.model).
             seed: independent random seed.
+            init_theta: initial theta (if None, random init). Used for resume.
         """
         self.config = config
         self.model = model if model is not None else config.model
         self.rng: Generator = np.random.default_rng(
             seed if seed is not None else config.seed
         )
-        # Initialize theta using the model's init_params
-        self.theta = self.model.init_params(self.rng, config.d_x)
+        if init_theta is not None:
+            self.theta = init_theta.copy()
+        else:
+            self.theta = self.model.init_params(self.rng, config.d_x)
         self.t = 0  # iteration counter
+
+    @property
+    def samples_per_step(self) -> int:
+        """Number of (z, x, y) samples consumed per training step.
+
+        Used to equalize the total sample budget across algorithms
+        (not iterations) for fair comparison.
+        """
+        raise NotImplementedError
 
     def _learning_rate(self) -> float:
         """Compute the current learning rate alpha_t.
@@ -90,7 +103,8 @@ class BaseIVAlgorithm:
         raise NotImplementedError
 
     def train(
-        self, generator: IVDataGenerator, n_iter: int, verbose: bool = False
+        self, generator: IVDataGenerator, n_iter: int, verbose: bool = False,
+        verbose_every: int = 5000,
     ) -> list[dict]:
         """Train for n_iter steps.
 
@@ -98,6 +112,7 @@ class BaseIVAlgorithm:
             generator: online data generator.
             n_iter: number of iterations.
             verbose: whether to print progress.
+            verbose_every: print interval (iterations).
 
         Returns:
             history: list of {'step': int, 'theta': ndarray,
@@ -121,7 +136,7 @@ class BaseIVAlgorithm:
                 "loss": loss,
                 "lr": lr,
             })
-            if verbose and self.t % 500 == 0:
+            if verbose and self.t % verbose_every == 0:
                 theta_norm = np.linalg.norm(
                     self.theta - self.config.theta_star
                 )
@@ -149,6 +164,10 @@ class TOSGIVaR(BaseIVAlgorithm):
 
     def _get_lr0(self) -> float:
         return self.config.tosg_lr
+
+    @property
+    def samples_per_step(self) -> int:
+        return 2  # two conditionally independent (x,y) pairs per step
 
     def _get_lr_decay(self) -> float:
         return self.config.tosg_lr_decay
@@ -218,6 +237,7 @@ class FirstOrderSLIM(BaseIVAlgorithm):
         B_M: int | None = None,
         B_m: int | None = None,
         W_type: str | None = None,
+        init_theta: np.ndarray | None = None,
     ):
         """
         Args:
@@ -228,8 +248,9 @@ class FirstOrderSLIM(BaseIVAlgorithm):
             B_M: batch size for Jacobian estimate M̃. Defaults to config.slim_B_M.
             B_m: batch size for moment estimate m̃. Defaults to config.slim_B_m.
             W_type: "identity", "random", or "custom". Defaults to config.slim_W_type.
+            init_theta: initial theta (None = random).
         """
-        super().__init__(config, model, seed)
+        super().__init__(config, model, seed, init_theta=init_theta)
 
         # --- Batch sizes ---
         self.B_M = B_M if B_M is not None else getattr(config, "slim_B_M", 1)
@@ -274,6 +295,10 @@ class FirstOrderSLIM(BaseIVAlgorithm):
 
     def _get_lr0(self) -> float:
         return self.config.slim_lr
+
+    @property
+    def samples_per_step(self) -> int:
+        return self.B_M + self.B_m
 
     def _get_lr_decay(self) -> float:
         return self.config.slim_lr_decay
@@ -334,11 +359,11 @@ class FirstOrderSLIM(BaseIVAlgorithm):
 
 
 # ---------------------------------------------------------------------------
-# OSTG-IVaR
+# OTSG
 # ---------------------------------------------------------------------------
 
-class OSTGIVaR(BaseIVAlgorithm):
-    """OSTG-IVaR (One-Sample Two-Stage Gradient IV Regression).
+class OTSGIVaR(BaseIVAlgorithm):
+    """OTSG (One-Sample Two-Stage Gradient IV Regression).
 
     Update rule (Algorithm 2, Chen et al. 2024):
         theta_{t+1} = theta_t
@@ -358,32 +383,37 @@ class OSTGIVaR(BaseIVAlgorithm):
         config: SimulationConfig,
         model: BaseModel | None = None,
         seed: int | None = None,
+        init_theta: np.ndarray | None = None,
     ):
-        super().__init__(config, model, seed)
+        super().__init__(config, model, seed, init_theta=init_theta)
         # First-stage parameters: gamma of shape (d_z, d_x)
         self.gamma = LinearFirstStage.init_params(
             self.rng, config.d_z, config.d_x
         )
 
     def _get_lr0(self) -> float:
-        return self.config.ostg_theta_lr
+        return self.config.otsg_theta_lr
+
+    @property
+    def samples_per_step(self) -> int:
+        return 1  # one (z, x, y) observation per step
 
     def _get_lr_decay(self) -> float:
-        return self.config.ostg_theta_lr_decay
+        return self.config.otsg_theta_lr_decay
 
     def _gamma_learning_rate(self) -> float:
         """Compute current gamma learning rate beta_t.
 
         Uses a separate decay schedule for the first-stage update.
         """
-        beta0 = self.config.ostg_gamma_lr
-        decay = self.config.ostg_gamma_lr_decay
+        beta0 = self.config.otsg_gamma_lr
+        decay = self.config.otsg_gamma_lr_decay
         return beta0 / (self.t ** decay)
 
     def _step(
         self, generator: IVDataGenerator, alpha: float
     ) -> tuple[np.ndarray, float]:
-        """OSTG-IVaR single-step update.
+        """OTSG single-step update.
 
         1. Draw one (z, x, y)
         2. Predict x_hat = h(gamma_t; z_t)
@@ -426,16 +456,119 @@ class OSTGIVaR(BaseIVAlgorithm):
 
 
 # ---------------------------------------------------------------------------
+# Distance Covariance Optimization (DCO)
+# ---------------------------------------------------------------------------
+
+class DistanceCovOpt(BaseIVAlgorithm):
+    """Distance Covariance Optimization for IV regression.
+
+    Minimizes a centered pairwise-distance objective that drives z and
+    residual r(θ) = y - g(θ; x) toward independence.  For a batch of B:
+
+        D_{ij} = ||z_i - z_j||,   R2_{ij} = (r_i - r_j)^2
+        F = mean(D * R2) - mean(D) * mean(R2)
+
+    This is zero when z ⟂ r.  The gradient uses smooth squared
+    differences (no sign function), making it amenable to SGD.
+
+    Reference: Székely et al. (2007), Annals of Statistics.
+    """
+
+    def __init__(
+        self,
+        config: SimulationConfig,
+        model: BaseModel | None = None,
+        seed: int | None = None,
+        B: int | None = None,
+        init_theta: np.ndarray | None = None,
+    ):
+        """
+        Args:
+            config: simulation configuration.
+            model: structural model instance.
+            seed: independent random seed.
+            B: batch size for dCov estimate. Defaults to config.dcov_B.
+            init_theta: initial theta (None = random).
+        """
+        super().__init__(config, model, seed, init_theta=init_theta)
+        self.B = B if B is not None else getattr(config, "dcov_B", 32)
+
+    def _get_lr0(self) -> float:
+        return self.config.dcov_lr
+
+    @property
+    def samples_per_step(self) -> int:
+        return self.B
+
+    def _get_lr_decay(self) -> float:
+        return self.config.dcov_lr_decay
+
+    def _step(
+        self, generator: IVDataGenerator, alpha: float
+    ) -> tuple[np.ndarray, float]:
+        """DCO single-step update.
+
+        Minimizes a centered pairwise-distance objective:
+            F = mean(D * R2) - mean(D) * mean(R2)
+
+        where D_{ij} = ||z_i - z_j|| and R2_{ij} = (r_i - r_j)^2.
+        This is zero when z and r are independent and uses smooth
+        (non-sign) gradients.
+        """
+        B = self.B
+
+        # --- 1. Sample batch ---
+        z, x, y = generator.generate_batch(B)
+
+        # --- 2. Pairwise z-distance ---
+        z_diff = z[:, None, :] - z[None, :, :]
+        D_raw = np.linalg.norm(z_diff, axis=-1)           # (B, B)
+
+        # --- 3. Residuals and squared differences ---
+        pred = self.model.predict(self.theta, x)           # (B, 1)
+        r_flat = (pred - y).ravel()                        # (B,)
+        r_diff = r_flat[:, None] - r_flat[None, :]         # (B, B)
+        R2 = r_diff ** 2                                   # (B, B)
+
+        # --- 4. Centered gradient ---
+        # ∂F/∂θ = (2/B²) * ∇g^T @ [ (D - mean(D)) ⊙ (r_i - r_j) ] @ 1 · 2
+        # (The factor of 2 comes from ∂(r_i - r_j)^2/∂θ)
+        D_mean = D_raw.mean()
+        D_centered = D_raw - D_mean                        # (B, B)
+        # Weight each sample by centered distance * residual diff
+        weights = D_centered * r_diff                      # (B, B)
+        w_sum = weights.sum(axis=1, keepdims=True)         # (B, 1)
+
+        grad_g = self.model.gradient(self.theta, x)        # (B, d_theta)
+        grad_F = (4.0 / (B * B)) * (grad_g.T @ w_sum)      # (d_theta, 1)
+
+        # --- 5. Gradient normalization ---
+        gnorm = float(np.linalg.norm(grad_F))
+        if gnorm > 1e-8:
+            grad_F = grad_F / gnorm
+
+        # --- 6. Loss: centered distance objective (for monitoring) ---
+        loss = np.mean(D_raw * R2) - D_mean * R2.mean()
+
+        theta_new = self.theta - alpha * grad_F
+
+        return theta_new, loss
+
+
+# ---------------------------------------------------------------------------
 # Algorithm registry
 # ---------------------------------------------------------------------------
 
 _ALGO_REGISTRY = {
     "tosg": TOSGIVaR,
     "tosg_ivar": TOSGIVaR,
-    "ostg": OSTGIVaR,
-    "ostg_ivar": OSTGIVaR,
+    "otsg": OTSGIVaR,
+    "otsg_ivar": OTSGIVaR,
     "slim": FirstOrderSLIM,
     "first_order_slim": FirstOrderSLIM,
+    "dcov": DistanceCovOpt,
+    "dco": DistanceCovOpt,
+    "distance_cov": DistanceCovOpt,
 }
 
 

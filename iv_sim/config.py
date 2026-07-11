@@ -37,11 +37,12 @@ class SimulationConfig:
     gamma_star: np.ndarray = None   # h(gamma*; z) = gamma*^T z
     model: BaseModel = None         # the model instance
 
-    # --- Noise standard deviations ---
-    sigma_z: float = 1.0   # std of instrument z
-    sigma_c: float = 0.5   # std of confounding term c
-    sigma_y: float = 0.3   # std of true noise eps_y
-    sigma_x: float = 0.3   # std of true noise eps_x (per component)
+    # --- Noise / distribution parameters ---
+    mean_z: float = 0.0   # mean of instrument z (per component)
+    sigma_z: float = 1.0  # std of instrument z
+    sigma_c: float = 0.5  # std of confounding term c
+    sigma_y: float = 0.3  # std of true noise eps_y
+    sigma_x: float = 0.3  # std of true noise eps_x (per component)
 
     # --- Algorithm parameters ---
     # TOSG-IVaR
@@ -55,16 +56,20 @@ class SimulationConfig:
     slim_B_m: int = 1          # batch size for moment estimate m̃
     slim_W_type: str = "identity"  # "identity", "random", "custom"
 
-    # OSTG-IVaR
-    ostg_theta_lr: float = 0.01      # learning rate for theta
-    ostg_theta_lr_decay: float = 0.5
-    ostg_gamma_lr: float = 0.01      # learning rate for gamma (first-stage)
-    ostg_gamma_lr_decay: float = 0.5
+    # OTSG-IVaR
+    otsg_theta_lr: float = 0.01      # learning rate for theta
+    otsg_theta_lr_decay: float = 0.5
+    otsg_gamma_lr: float = 0.01      # learning rate for gamma (first-stage)
+    otsg_gamma_lr_decay: float = 0.5
+
+    # Distance Covariance Optimization (DCO)
+    dcov_lr: float = 0.01            # initial learning rate
+    dcov_lr_decay: float = 0.5       # decay exponent
+    dcov_B: int = 64                 # batch size for dCov estimate
 
     # --- Training ---
-    n_samples: int = 5000    # online samples per epoch
-    n_epochs: int = 100      # number of epochs
-    batch_size: int = 1      # SGD batch size (online SGD = 1)
+    n_iterations: int = 100000  # iterations per run (same for all algorithms)
+    verbose_every: int = 50000  # print progress every N iterations
 
     # --- Repetition ---
     n_repeats: int = 10      # number of independent runs
@@ -110,7 +115,7 @@ def low_noise_config() -> SimulationConfig:
         sigma_c=0.2,
         sigma_y=0.1,
         sigma_x=0.1,
-        n_epochs=200,
+        n_iterations=1_000_000,
     )
 
 
@@ -123,7 +128,7 @@ def quadratic_config() -> SimulationConfig:
         sigma_c=0.3,
         sigma_y=0.2,
         sigma_x=0.2,
-        n_epochs=200,
+        n_iterations=1_000_000,
     )
 
 
@@ -136,5 +141,5 @@ def poly_config(degree: int = 2) -> SimulationConfig:
         sigma_c=0.2,
         sigma_y=0.1,
         sigma_x=0.1,
-        n_epochs=200,
+        n_iterations=1_000_000,
     )

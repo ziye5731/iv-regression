@@ -18,31 +18,39 @@ import numpy as np
 # ---------------------------------------------------------------------------
 
 COLORS = {
-    "tosg": "#2196F3",    # blue
-    "tosg_ivar": "#2196F3",
-    "ostg": "#4CAF50",    # green
-    "ostg_ivar": "#4CAF50",
-    "slim": "#FF5722",    # orange
-    "first_order_slim": "#FF5722",
+    # TOSG/OTSG/DCOV: warm family
+    "tosg": "#FF9646",       # orange
+    "tosg_ivar": "#FF9646",
+    "otsg": "#810000",       # dark red
+    "otsg_ivar": "#810000",
+    "dcov": "#7B1FA2",       # purple
+    "dco": "#7B1FA2",
+    "distance_cov": "#7B1FA2",
+    # SLIM default fallback
+    "slim": "#2979FF",       # bright blue
+    "first_order_slim": "#2979FF",
 }
 
-# Palette for multiple SLIM variants (B_M, B_m, W combos)
+# Palette for SLIM variants: cool, spread across blue-cyan-teal-green-lime-indigo
 _SLIM_PALETTE = [
-    "#FF5722",  # orange
-    "#9C27B0",  # purple
-    "#00BCD4",  # cyan
-    "#FF9800",  # amber
-    "#E91E63",  # pink
-    "#3F51B5",  # indigo
-    "#8BC34A",  # light green
-    "#795548",  # brown
+    "#2979FF",  # bright blue
+    "#1A237E",  # dark indigo
+    "#61EDFF",  # cyan
+    "#3BFF41",  # green
+    "#009688",  # teal
+    "#1F4500",
+    "#B5FF35",  # light blue
+    "#DD00FF",
 ]
 
 LABELS = {
     "tosg": "TOSG-IVaR",
     "tosg_ivar": "TOSG-IVaR",
-    "ostg": "OSTG-IVaR",
-    "ostg_ivar": "OSTG-IVaR",
+    "otsg": "OTSG",
+    "otsg_ivar": "OTSG",
+    "dcov": "DCOV",
+    "dco": "DCOV",
+    "distance_cov": "DCOV",
     "slim": "First-Order SLIM",
     "first_order_slim": "First-Order SLIM",
 }
@@ -176,6 +184,8 @@ def plot_comparison(
     dpi: int = DPI,
     save_path: str | None = None,
     use_quantile: bool = True,
+    x_scale: str = "log",
+    title: str = "Same iterations",
 ):
     """Plot convergence curves for multiple algorithms side-by-side.
 
@@ -185,6 +195,8 @@ def plot_comparison(
         dpi: resolution.
         save_path: path to save the figure.
         use_quantile: if True, shade IQR; else shade mean±std.
+        x_scale: "log" or "linear" for x-axis scale.
+        title: subtitle for the figure.
     """
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize, dpi=dpi)
 
@@ -225,15 +237,134 @@ def plot_comparison(
 
     ax1.set_xlabel("Iteration")
     ax1.set_ylabel(r"Parameter error $\|\hat{\theta} - \theta^*\|_2$")
-    ax1.set_title("Parameter error comparison")
+    ax1.set_title(f"Parameter error ({title})")
     ax1.set_yscale("log")
+    ax1.set_xscale(x_scale)
     ax1.legend()
     ax1.grid(True, alpha=0.3)
 
     ax2.set_xlabel("Iteration")
     ax2.set_ylabel("Prediction MSE")
-    ax2.set_title("Prediction MSE comparison")
+    ax2.set_title(f"Prediction MSE ({title})")
     ax2.set_yscale("log")
+    ax2.set_xscale(x_scale)
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        print(f"Figure saved to: {save_path}")
+        plt.close(fig)
+    else:
+        plt.show()
+
+
+# ---------------------------------------------------------------------------
+# Same-samples comparison plot
+# ---------------------------------------------------------------------------
+
+def plot_comparison_by_samples(
+    all_results: dict[str, dict[str, np.ndarray]],
+    samples_per_step: dict[str, int],
+    figsize: tuple = (12, 5),
+    dpi: int = DPI,
+    save_path: str | None = None,
+    use_quantile: bool = True,
+    x_scale: str = "log",
+):
+    """Plot convergence vs *samples seen* (not iterations).
+
+    Each algorithm is truncated to the minimum sample budget across all
+    methods.  Batch methods that see more samples per step are interpolated
+    onto the common sample-count grid for fair visual comparison.
+
+    Args:
+        all_results: {algo_name: aggregate_repeats() result}.
+        samples_per_step: {algo_name: int} samples consumed per iteration.
+        figsize, dpi, save_path, use_quantile: same as plot_comparison.
+        x_scale: "log" or "linear" for x-axis scale.
+    """
+    if not samples_per_step:
+        return  # nothing to compare
+
+    # Minimum samples per step (baseline: online, 1 sample/step)
+    min_sp = min(samples_per_step.values())
+
+    # Determine the common sample-count grid
+    # All algorithms ran for the same iterations, so each has the same
+    # number of history points.  The baseline (min_sp) sees:
+    #   max_samples = n_iter * min_sp
+    first_key = next(iter(all_results))
+    n_iter = len(all_results[first_key]["steps"])
+    max_samples = n_iter * min_sp
+    # Common grid: every `min_sp` samples (matching the baseline's steps)
+    common_grid = np.arange(min_sp, max_samples + 1, min_sp, dtype=float)
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize, dpi=dpi)
+
+    for algo_name, results in all_results.items():
+        color, label = _get_color_and_label(algo_name)
+        sp = samples_per_step.get(algo_name, 1)
+
+        # Sample counts at each step: [sp, 2*sp, ..., n_iter*sp]
+        sample_counts = results["steps"].astype(float) * sp
+        # How many steps to keep (up to max_samples)
+        keep = sample_counts <= max_samples
+        if not np.any(keep):
+            continue
+        sample_counts = sample_counts[keep]
+
+        # Choose band and line
+        if use_quantile and "param_error_q25" in results:
+            lo1_raw = results["param_error_q25"][keep]
+            hi1_raw = results["param_error_q75"][keep]
+            lo2_raw = results["pred_mse_q25"][keep]
+            hi2_raw = results["pred_mse_q75"][keep]
+        else:
+            lo1_raw = (results["param_error_mean"] - results["param_error_std"])[keep]
+            hi1_raw = (results["param_error_mean"] + results["param_error_std"])[keep]
+            lo2_raw = (results["pred_mse_mean"] - results["pred_mse_std"])[keep]
+            hi2_raw = (results["pred_mse_mean"] + results["pred_mse_std"])[keep]
+        line1_raw = results.get("param_error_median", results["param_error_mean"])[keep]
+        line2_raw = results.get("pred_mse_median", results["pred_mse_mean"])[keep]
+
+        # Interpolate to common grid
+        if sp == min_sp:
+            line1 = line1_raw
+            line2 = line2_raw
+            lo1, hi1 = lo1_raw, hi1_raw
+            lo2, hi2 = lo2_raw, hi2_raw
+            x_vals = sample_counts
+        else:
+            line1 = np.interp(common_grid, sample_counts, line1_raw)
+            line2 = np.interp(common_grid, sample_counts, line2_raw)
+            lo1 = np.interp(common_grid, sample_counts, lo1_raw)
+            hi1 = np.interp(common_grid, sample_counts, hi1_raw)
+            lo2 = np.interp(common_grid, sample_counts, lo2_raw)
+            hi2 = np.interp(common_grid, sample_counts, hi2_raw)
+            x_vals = common_grid
+
+        ax1.plot(x_vals, line1, color=color, linewidth=1.5, label=label)
+        ax1.fill_between(x_vals, lo1, hi1, color=color, alpha=0.1)
+
+        ax2.plot(x_vals, line2, color=color, linewidth=1.5, label=label)
+        ax2.fill_between(x_vals, lo2, hi2, color=color, alpha=0.1)
+
+    ax1.set_xlabel("Samples seen")
+    ax1.set_ylabel(r"Parameter error $\|\hat{\theta} - \theta^*\|_2$")
+    ax1.set_title("Parameter error (same samples)")
+    ax1.set_yscale("log")
+    ax1.set_xscale(x_scale)
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+
+    ax2.set_xlabel("Samples seen")
+    ax2.set_ylabel("Prediction MSE")
+    ax2.set_title("Prediction MSE (same samples)")
+    ax2.set_yscale("log")
+    ax2.set_xscale(x_scale)
     ax2.legend()
     ax2.grid(True, alpha=0.3)
 

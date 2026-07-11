@@ -8,7 +8,7 @@ Data generating process (model-agnostic):
     x = gamma*^T z   + c + eps_x
 
 Noise distributions:
-    z   ~ N(0, sigma_z^2 I)
+    z   ~ N(mean_z * 1, sigma_z^2 I)
     c   ~ N(0, sigma_c^2)
     eps_y ~ N(0, sigma_y^2)
     eps_x ~ N(0, sigma_x^2 I)
@@ -56,9 +56,9 @@ class IVDataGenerator:
     # ------------------------------------------------------------------
 
     def _sample_z(self, n: int) -> np.ndarray:
-        """Sample instruments z ~ N(0, sigma_z^2 I).  Shape: (n, d_z)."""
+        """Sample instruments z ~ N(mean_z, sigma_z^2 I).  Shape: (n, d_z)."""
         return self.rng.normal(
-            0, self.config.sigma_z, size=(n, self.config.d_z)
+            self.config.mean_z, self.config.sigma_z, size=(n, self.config.d_z)
         )
 
     def _sample_c(self, n: int) -> np.ndarray:

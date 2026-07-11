@@ -17,6 +17,7 @@ import numpy as np
 from abc import ABC, abstractmethod
 from itertools import combinations_with_replacement
 from math import comb
+from typing import Optional
 
 
 # ---------------------------------------------------------------------------
@@ -221,6 +222,223 @@ class QuadraticModel(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Neural network (single hidden layer)
+# ---------------------------------------------------------------------------
+
+class NeuralNetModel(BaseModel):
+    """Single-hidden-layer neural network with tanh activation.
+
+        g(theta; x) = w^T tanh(W x + b) + c
+
+    where theta = [W_flat; b; w; c].
+    Hidden dim H = d_x (same as input for simplicity).
+    Total params: d_x*H + H + H + 1.
+    """
+
+    def __init__(self, hidden_dim: Optional[int] = None):
+        self._hidden_dim = hidden_dim
+
+    def _H(self, d_x: int) -> int:
+        return self._hidden_dim if self._hidden_dim is not None else max(2, d_x)
+
+    def _unpack(self, theta: np.ndarray, d_x: int):
+        H = self._H(d_x)
+        th = theta.ravel()
+        W_flat = th[:d_x * H].reshape(H, d_x)       # (H, d_x)
+        b_vec = th[d_x * H : d_x * H + H].reshape(H, 1)  # (H, 1)
+        w_vec = th[d_x * H + H : d_x * H + 2*H].reshape(H, 1)  # (H, 1)
+        c_val = th[-1]                                # scalar
+        return W_flat, b_vec, w_vec, c_val
+
+    def predict(self, theta: np.ndarray, x: np.ndarray) -> np.ndarray:
+        d_x = x.shape[-1]
+        W, b, w, c = self._unpack(theta, d_x)
+        hidden = np.tanh(x @ W.T + b.T)  # (n, H)
+        return hidden @ w + c            # (n, 1)
+
+    def gradient(self, theta: np.ndarray, x: np.ndarray) -> np.ndarray:
+        d_x = x.shape[-1]
+        H = self._H(d_x)
+        n = x.shape[0]
+        W, b, w, c = self._unpack(theta, d_x)
+
+        z = x @ W.T + b.T                     # (n, H)
+        tanh_z = np.tanh(z)                    # (n, H)
+        dtanh = 1.0 - tanh_z ** 2              # (n, H)
+        delta = dtanh * w.T                    # (n, H) weighted by w
+
+        # Grad w.r.t W_ij: delta[:,j] * x[:,i]
+        grad_W = np.einsum("nh,ni->nhi", delta, x).reshape(n, -1)  # (n, H*d_x)
+        # Grad w.r.t b_j: delta
+        grad_b = delta                                          # (n, H)
+        # Grad w.r.t w_j: tanh_z
+        grad_w = tanh_z                                         # (n, H)
+        # Grad w.r.t c: 1
+        grad_c = np.ones((n, 1))                                # (n, 1)
+
+        return np.concatenate([grad_W, grad_b, grad_w, grad_c], axis=-1)
+
+    def init_params(self, rng: np.random.Generator, d_x: int) -> np.ndarray:
+        H = self._H(d_x)
+        d = self.param_dim(d_x)
+        return rng.normal(0, 0.1, size=(d, 1))
+
+    def true_params(self, rng: np.random.Generator, d_x: int) -> np.ndarray:
+        H = self._H(d_x)
+        d = self.param_dim(d_x)
+        # Xavier-like init scaled to reasonable magnitude
+        theta = np.zeros((d, 1))
+        # W: d_x*H
+        s = np.sqrt(2.0 / (d_x + H))
+        theta[:d_x * H, 0] = rng.normal(0, s, size=d_x * H)
+        # b: H
+        theta[d_x * H:d_x * H + H, 0] = rng.normal(0, 0.5, size=H)
+        # w: H
+        theta[d_x * H + H:d_x * H + 2*H, 0] = rng.normal(0, 1.0 / np.sqrt(H), size=H)
+        # c
+        theta[-1, 0] = rng.normal(0, 0.5)
+        return theta
+
+    def param_dim(self, d_x: int) -> int:
+        H = self._H(d_x)
+        return d_x * H + 2 * H + 1
+
+
+# ---------------------------------------------------------------------------
+# Sinusoidal model
+# ---------------------------------------------------------------------------
+
+class SinusoidalModel(BaseModel):
+    """Sum of sinusoidal components.
+
+        g(theta; x) = Σ_{k=1}^K a_k * sin(b_k^T x + c_k)
+
+    where K = min(5, d_x+1).  Each component has d_x + 2 params.
+    Total: K * (d_x + 2).
+    """
+
+    def _K(self, d_x: int) -> int:
+        return min(5, d_x + 1)
+
+    def _unpack(self, theta: np.ndarray, d_x: int):
+        K = self._K(d_x)
+        th = theta.ravel()
+        # params per component: a_k (scalar), b_k (d_x,), c_k (scalar)
+        per = d_x + 2
+        a_list = th[0::per]                    # K scalars
+        b_mat = np.zeros((K, d_x))
+        c_list = np.zeros(K)
+        for k in range(K):
+            b_mat[k] = th[k * per + 1 : k * per + 1 + d_x]
+            c_list[k] = th[k * per + 1 + d_x]
+        return a_list, b_mat, c_list
+
+    def predict(self, theta: np.ndarray, x: np.ndarray) -> np.ndarray:
+        d_x = x.shape[-1]
+        K = self._K(d_x)
+        a_list, b_mat, c_list = self._unpack(theta, d_x)
+        result = np.zeros((x.shape[0], 1))
+        for k in range(K):
+            result += a_list[k] * np.sin(x @ b_mat[k:k+1].T + c_list[k])
+        return result
+
+    def gradient(self, theta: np.ndarray, x: np.ndarray) -> np.ndarray:
+        d_x = x.shape[-1]
+        K = self._K(d_x)
+        n = x.shape[0]
+        a_list, b_mat, c_list = self._unpack(theta, d_x)
+        grads = []
+        for k in range(K):
+            arg = (x @ b_mat[k:k+1].T + c_list[k]).ravel()  # (n,)
+            cos_arg = np.cos(arg).reshape(-1, 1)             # (n, 1)
+            sin_arg = np.sin(arg).reshape(-1, 1)             # (n, 1)
+            # d/da_k: sin(arg)
+            grad_ak = sin_arg                                # (n, 1)
+            # d/db_k: a_k * cos(arg) * x
+            grad_bk = a_list[k] * cos_arg * x                 # (n, d_x)
+            # d/dc_k: a_k * cos(arg)
+            grad_ck = a_list[k] * cos_arg                     # (n, 1)
+            grads.append(np.concatenate([grad_ak, grad_bk, grad_ck], axis=-1))
+        return np.concatenate(grads, axis=-1)                 # (n, K*(d_x+2))
+
+    def init_params(self, rng: np.random.Generator, d_x: int) -> np.ndarray:
+        d = self.param_dim(d_x)
+        return rng.normal(0, 0.1, size=(d, 1))
+
+    def true_params(self, rng: np.random.Generator, d_x: int) -> np.ndarray:
+        K = self._K(d_x)
+        d = self.param_dim(d_x)
+        theta = np.zeros((d, 1))
+        per = d_x + 2
+        for k in range(K):
+            theta[k * per, 0] = rng.normal(0, 1.0)           # a_k
+            theta[k * per + 1 : k * per + 1 + d_x, 0] = \
+                rng.normal(0, 1.0 / np.sqrt(d_x), size=d_x)  # b_k
+            theta[k * per + 1 + d_x, 0] = rng.normal(0, 1.0) # c_k
+        return theta
+
+    def param_dim(self, d_x: int) -> int:
+        return self._K(d_x) * (d_x + 2)
+
+
+# ---------------------------------------------------------------------------
+# Sigmoid (logistic) model
+# ---------------------------------------------------------------------------
+
+class SigmoidModel(BaseModel):
+    """Sigmoid / logistic function.
+
+        g(theta; x) = a / (1 + exp(-(b^T x + c)))
+
+    Total params: d_x + 2  (b vec, c scalar, a scale).
+    """
+
+    def _unpack(self, theta: np.ndarray, d_x: int):
+        th = theta.ravel()
+        b_vec = th[:d_x].reshape(d_x, 1)
+        c_val = th[d_x]
+        a_val = th[d_x + 1]
+        return b_vec, c_val, a_val
+
+    def predict(self, theta: np.ndarray, x: np.ndarray) -> np.ndarray:
+        d_x = x.shape[-1]
+        b_vec, c_val, a_val = self._unpack(theta, d_x)
+        z = x @ b_vec + c_val  # (n, 1)
+        return a_val / (1.0 + np.exp(-z))
+
+    def gradient(self, theta: np.ndarray, x: np.ndarray) -> np.ndarray:
+        d_x = x.shape[-1]
+        b_vec, c_val, a_val = self._unpack(theta, d_x)
+        z = x @ b_vec + c_val
+        sig = 1.0 / (1.0 + np.exp(-z))          # (n, 1)
+        dsig = sig * (1.0 - sig)                 # (n, 1)
+
+        # d/db: a * dsig * x
+        grad_b = a_val * dsig * x                # (n, d_x)
+        # d/dc: a * dsig
+        grad_c = a_val * dsig                    # (n, 1)
+        # d/da: sig
+        grad_a = sig                             # (n, 1)
+
+        return np.concatenate([grad_b, grad_c, grad_a], axis=-1)
+
+    def init_params(self, rng: np.random.Generator, d_x: int) -> np.ndarray:
+        d = self.param_dim(d_x)
+        return rng.normal(0, 0.1, size=(d, 1))
+
+    def true_params(self, rng: np.random.Generator, d_x: int) -> np.ndarray:
+        d = self.param_dim(d_x)
+        theta = np.zeros((d, 1))
+        theta[:d_x, 0] = rng.normal(0, 0.5 / np.sqrt(d_x), size=d_x)  # b
+        theta[d_x, 0] = rng.normal(0, 0.2)                              # c
+        theta[d_x + 1, 0] = rng.normal(0, 2.0)                          # a (scale)
+        return theta
+
+    def param_dim(self, d_x: int) -> int:
+        return d_x + 2
+
+
+# ---------------------------------------------------------------------------
 # Polynomial model (all monomials up to given degree)
 # ---------------------------------------------------------------------------
 
@@ -299,7 +517,7 @@ class LinearFirstStage:
 
     Maps instruments z to explanatory variables x.
     Used both for data generation and as the trainable first-stage
-    in OSTG-IVaR.
+    in OTSG.
 
     gamma has shape (d_z, d_x).
     """
@@ -322,7 +540,7 @@ class LinearFirstStage:
         """Compute nabla_gamma h(gamma; z) w.r.t. gamma.
 
         For h = z @ gamma, the gradient w.r.t gamma (flattened) is a
-        matrix of shape (d_x, d_z * d_x).  For the OSTG update we need
+        matrix of shape (d_x, d_z * d_x).  For the OTSG update we need
         nabla_gamma h(gamma; z)^T * (h - x), which simplifies to
         z^T @ (h - x) of shape (d_z, d_x).
 
@@ -335,7 +553,7 @@ class LinearFirstStage:
             z: (n, d_z).
 
         Returns:
-            A tensor-like representation.  For the OSTG update,
+            A tensor-like representation.  For the OTSG update,
             the caller will compute: z.T @ residual  → (d_z, d_x).
             We return z so the caller can do the multiplication.
 
@@ -397,6 +615,9 @@ _MODEL_REGISTRY: dict[str, BaseModel] = {
     "quadratic": QuadraticModel(),
     "poly2": _make_poly2(),
     "poly3": _make_poly3(),
+    "nn": NeuralNetModel(),
+    "sin": SinusoidalModel(),
+    "sigmoid": SigmoidModel(),
 }
 
 
