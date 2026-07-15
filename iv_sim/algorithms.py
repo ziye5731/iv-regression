@@ -612,8 +612,7 @@ class DCOV3(BaseIVAlgorithm):
         z, x, y = generator.generate_batch(3)          # (3, d_z), (3, d_x), (3, 1)
 
         # --- 2. Precompute residuals & gradients ---
-        # ε = y - g(θ; x)  (NOT g(θ;x) - y — sign matters for sgn(·))
-        residuals = (y - self.model.predict(self.theta, x)).ravel()  # (3,)
+        residuals = (self.model.predict(self.theta, x) - y).ravel()  # (3,)
         grads = self.model.gradient(self.theta, x)                    # (3, d_theta)
 
         # --- 3. Pairwise z-distances ---
@@ -630,7 +629,7 @@ class DCOV3(BaseIVAlgorithm):
 
         grad_F = np.zeros_like(self.theta)                # (d_theta, 1)
         for i, j, k in perms:
-            z_term = z_dists[i, j] - 2.0 * z_dists[i, k] + self.delta_hat
+            z_term = z_dists[i, j] - 2.0 * z_dists[i, k] # + self.delta_hat
             sgn_term = np.sign(residuals[i] - residuals[j])
             grad_term = grads[j] - grads[i]              # (d_theta,)
             v = z_term * sgn_term * grad_term.reshape(-1, 1)
@@ -705,7 +704,7 @@ class DCOV4(BaseIVAlgorithm):
         z, x, y = generator.generate_batch(4)
 
         # --- 2. Precompute residuals, gradients, pairwise quantities ---
-        residuals = (y - self.model.predict(self.theta, x)).ravel()    # (4,)
+        residuals = (self.model.predict(self.theta, x) - y).ravel()    # (4,)
         grads = self.model.gradient(self.theta, x)                     # (4, d_theta)
 
         z_diff = z[:, None, :] - z[None, :, :]                         # (4, 4, d_z)

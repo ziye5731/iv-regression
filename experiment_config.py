@@ -43,7 +43,7 @@ DGP_DEEPGMM_HIDDEN_SIZES = [64, 32]  # MLP hidden layers
 # ============================================================================
 # 2. Algorithms
 # ============================================================================
-ALGO_LIST = ["dcov3"]
+ALGO_LIST = ["dcov","dcov3"]
 
 # --- TOSG ---
 ALGO_TOSG_LR = 0.01
@@ -80,7 +80,7 @@ ALGO_DCOV4_LR_DECAY = 0.5
 # 3. Other
 # ============================================================================
 SEED = 10
-N_ITERATIONS = int(2e6)
+N_ITERATIONS = int(1e6)
 N_REPEATS = 10
 VERBOSE_EVERY = int(1e5)
 RESUME_FROM = None
