@@ -25,10 +25,11 @@ from typing import Optional
 import numpy as np
 
 from iv_sim.config import SimulationConfig
-from iv_sim.data_generator import IVDataGenerator
-from iv_sim.algorithms import TOSGIVaR, FirstOrderSLIM, OTSGIVaR, DistanceCovOpt
+from iv_sim.data_generator import create_data_generator
+from iv_sim.dgp import get_dgp
+from iv_sim.algorithms import TOSGIVaR, FirstOrderSLIM, OTSGIVaR, DistanceCovOpt, DCOV3, DCOV4
 from iv_sim.metrics import aggregate_repeats
-from iv_sim.visualization import plot_comparison, plot_comparison_by_samples, print_summary_table
+from iv_sim.visualization import plot_comparison, plot_comparison_by_samples, print_summary_table, plot_comparison_mse_only
 
 
 def _load_config_module(config_path: str):
@@ -40,40 +41,50 @@ def _load_config_module(config_path: str):
 
 
 def build_simulation_config(cfg) -> SimulationConfig:
-    """Construct a SimulationConfig from the experiment config module."""
-    config = SimulationConfig(model_name=cfg.MODEL)
-    config.d_x = cfg.D_X
-    config.d_z = cfg.D_Z
-    config.mean_z = cfg.MEAN_Z
-    config.sigma_z = cfg.SIGMA_Z
-    config.sigma_c = cfg.SIGMA_C
-    config.sigma_y = cfg.SIGMA_Y
-    config.sigma_x = cfg.SIGMA_X
+    """Construct a SimulationConfig from the experiment config module.
+
+    DGP-specific dimension and hyperparameter reading is delegated to the
+    DGP descriptor so there is no per-mode branching here.
+    """
+    config = SimulationConfig()
+    # DGP mode — dimension defaults & model setup happen in __post_init__
+    config.dgp_mode = getattr(cfg, "DGP_MODE", "tosg")
+    dgp = get_dgp(config.dgp_mode)
+    dgp.configure(config, cfg)
+    # Seed & training
     config.seed = cfg.SEED
     config.n_iterations = cfg.N_ITERATIONS
     config.n_repeats = cfg.N_REPEATS
     config.verbose_every = getattr(cfg, "VERBOSE_EVERY", 50000)
-    config.tosg_lr = cfg.TOSG_LR
-    config.tosg_lr_decay = cfg.TOSG_LR_DECAY
-    config.otsg_theta_lr = cfg.OTSG_THETA_LR
-    config.otsg_theta_lr_decay = cfg.OTSG_THETA_LR_DECAY
-    config.otsg_gamma_lr = cfg.OTSG_GAMMA_LR
-    config.otsg_gamma_lr_decay = cfg.OTSG_GAMMA_LR_DECAY
-    config.slim_lr = cfg.SLIM_LR
-    config.slim_lr_decay = cfg.SLIM_LR_DECAY
-    config.dcov_lr = cfg.DCOV_LR
-    config.dcov_lr_decay = cfg.DCOV_LR_DECAY
-    config.dcov_B = cfg.DCOV_B
-    rng = np.random.default_rng(config.seed)
-    config.theta_star = config.model.true_params(rng, config.d_x)
-    config.gamma_star = rng.normal(0, 1, size=(config.d_z, config.d_x))
+    # Algorithm params (shared across DGPs)
+    config.tosg_lr = cfg.ALGO_TOSG_LR
+    config.tosg_lr_decay = cfg.ALGO_TOSG_LR_DECAY
+    config.otsg_theta_lr = cfg.ALGO_OTSG_THETA_LR
+    config.otsg_theta_lr_decay = cfg.ALGO_OTSG_THETA_LR_DECAY
+    config.otsg_gamma_lr = cfg.ALGO_OTSG_GAMMA_LR
+    config.otsg_gamma_lr_decay = cfg.ALGO_OTSG_GAMMA_LR_DECAY
+    config.slim_lr = cfg.ALGO_SLIM_LR
+    config.slim_lr_decay = cfg.ALGO_SLIM_LR_DECAY
+    config.dcov_lr = cfg.ALGO_DCOV_LR
+    config.dcov_lr_decay = cfg.ALGO_DCOV_LR_DECAY
+    config.dcov_B = cfg.ALGO_DCOV_B
+    config.dcov3_lr = getattr(cfg, "ALGO_DCOV3_LR", 0.1)
+    config.dcov3_lr_decay = getattr(cfg, "ALGO_DCOV3_LR_DECAY", 0.5)
+    config.dcov4_lr = getattr(cfg, "ALGO_DCOV4_LR", 0.01)
+    config.dcov4_lr_decay = getattr(cfg, "ALGO_DCOV4_LR_DECAY", 0.75)
+    # Re-trigger __post_init__ with corrected dimensions.
+    # The first __post_init__ (from SimulationConfig()) ran with defaults;
+    # reset auto-generated fields so they are regenerated with actual dims.
+    config.theta_star = None
+    config.gamma_star = None
+    config.__post_init__()
     return config
 
 
 def _parse_slim_configs(cfg) -> list[dict]:
-    """Convert SLIM_CONFIGS tuples to dict list with labels."""
+    """Convert ALGO_SLIM_CONFIGS tuples to dict list with labels."""
     configs = []
-    for B_M, B_m, W_type in cfg.SLIM_CONFIGS:
+    for B_M, B_m, W_type in cfg.ALGO_SLIM_CONFIGS:
         label = f"slim_B{B_M}_m{B_m}_{W_type[:2]}"
         configs.append({"B_M": B_M, "B_m": B_m, "W_type": W_type, "label": label})
     return configs
@@ -87,7 +98,9 @@ def run_single_experiment(
     init_theta: Optional[np.ndarray] = None,
 ) -> list[dict]:
     """Run one complete training run."""
-    generator = IVDataGenerator(config, seed=seed)
+    generator = create_data_generator(config, seed=seed)
+    # The DGP's create_generator already sets up the model if needed (DeepGMM)
+
     if algo_name.lower() in ("tosg", "tosg_ivar"):
         algo = TOSGIVaR(config, seed=seed + 1000, init_theta=init_theta)
     elif algo_name.lower() in ("otsg", "otsg_ivar"):
@@ -103,6 +116,10 @@ def run_single_experiment(
         )
     elif algo_name.lower() in ("dcov", "dco", "distance_cov"):
         algo = DistanceCovOpt(config, seed=seed + 1000, init_theta=init_theta)
+    elif algo_name.lower() in ("dcov3",):
+        algo = DCOV3(config, seed=seed + 1000, init_theta=init_theta)
+    elif algo_name.lower() in ("dcov4",):
+        algo = DCOV4(config, seed=seed + 1000, init_theta=init_theta)
     else:
         raise ValueError(f"Unknown algorithm: {algo_name}")
     # Same iterations for all algorithms
@@ -151,7 +168,7 @@ def run_repeated_experiment(
                                          init_theta=init_th)
         all_histories.append(history)
         final_thetas.append(history[-1]["theta"].copy())
-    eval_generator = IVDataGenerator(config, seed=config.seed + 99999)
+    eval_generator = create_data_generator(config, seed=config.seed + 99999)
     return aggregate_repeats(all_histories, config, eval_generator, skip=50), final_thetas
 
 
@@ -176,29 +193,25 @@ def _save_results(
         for i, th in enumerate(thetas):
             npz_kwargs[f"{algo_name}_theta_{i}"] = th
     np.savez(os.path.join(outdir, "results.npz"), **npz_kwargs)
+
+    dgp = get_dgp(config.dgp_mode)
+
     lines = []
     lines.append("=" * 60)
     lines.append("IV Regression Simulation Summary")
     lines.append("=" * 60)
     lines.append(f"Timestamp:   {datetime.now().isoformat()}")
-    lines.append(f"Model:       {config.model_name}")
-    lines.append(f"Dimensions:  d_x={config.d_x}, d_z={config.d_z}, d_theta={config.d_theta}")
-    lines.append(f"Z dist:      N({config.mean_z}, {config.sigma_z}^2 I)")
-    lines.append(f"Noise:       sigma_c={config.sigma_c}, sigma_y={config.sigma_y}, sigma_x={config.sigma_x}")
+    lines.append(dgp.summary_dgp_line(config))
+    lines.append(dgp.summary_dim_line(config))
     lines.append(f"Training:    {config.n_iterations} iterations")
     lines.append(f"Repeats:     {config.n_repeats}")
     lines.append(f"Algorithms:  {', '.join(algo_names)}")
     lines.append(f"Elapsed:     {round(elapsed, 1)} s")
     lines.append("-" * 60)
-    lines.append(f"{'Algorithm':<22} {'Median':>10} {'Mean+/-Std':>18} {'Pred MSE (med)':>16}")
+    lines.append(dgp.summary_header())
     lines.append("-" * 60)
     for algo_name, res in all_results.items():
-        label = algo_name.upper()
-        pe_med = res["param_error_median"][-1]
-        pe_mean = res["param_error_mean"][-1]
-        pe_std = res["param_error_std"][-1]
-        pm_med = res["pred_mse_median"][-1]
-        lines.append(f"{label:<22} {pe_med:>8.4f}   {pe_mean:>8.4f}+/-{pe_std:.4f}   {pm_med:>12.4f}")
+        lines.append(dgp.summary_row(algo_name, res))
     lines.append("=" * 60)
     text = "\n".join(lines)
     with open(os.path.join(outdir, "summary.txt"), "w") as f:
@@ -251,7 +264,7 @@ def main():
         outdir = os.path.join("results", datetime.now().strftime("%m%d-%H%M"))
     save_plot = cfg.SAVE_PLOT
     # --- Resolve algorithm selection ---
-    algo_list = cfg.ALGORITHMS
+    algo_list = cfg.ALGO_LIST
     if isinstance(algo_list, str):
         algo_list = [algo_list]  # backward compat: single string
 
@@ -259,6 +272,8 @@ def main():
     run_tosg = "tosg" in algo_list or "all" in algo_list
     run_otsg = "otsg" in algo_list or "all" in algo_list
     run_dcov = "dcov" in algo_list or "all" in algo_list
+    run_dcov3 = "dcov3" in algo_list or "all" in algo_list
+    run_dcov4 = "dcov4" in algo_list or "all" in algo_list
     run_slim = "slim" in algo_list or "all" in algo_list
 
     if run_tosg:
@@ -267,16 +282,19 @@ def main():
         algo_names.append("OTSG-IVaR")
     if run_dcov:
         algo_names.append("DCOV")
+    if run_dcov3:
+        algo_names.append("DCOV3")
+    if run_dcov4:
+        algo_names.append("DCOV4")
     if run_slim:
         for sc in slim_configs:
             algo_names.append(f"SLIM(B_M={sc['B_M']}, B_m={sc['B_m']}, W={sc['W_type']})")
     print("=" * 60)
     print("  IV Regression Simulation")
     print("=" * 60)
-    print(f"  Model:      {config.model_name}")
-    print(f"  Dimensions: d_x = {config.d_x}, d_z = {config.d_z}, d_theta = {config.d_theta}")
-    print(f"  Z dist:     N({config.mean_z}, {config.sigma_z}^2 I)")
-    print(f"  Noise:      sigma_c={config.sigma_c}, sigma_y={config.sigma_y}, sigma_x={config.sigma_x}")
+    dgp = get_dgp(config.dgp_mode)
+    for line in dgp.startup_lines(config):
+        print(line)
     print(f"  Training:   {config.n_iterations} iterations per run")
     print(f"  Repeats:    {config.n_repeats}")
     print(f"  Algorithms: {', '.join(algo_names)}")
@@ -318,6 +336,12 @@ def main():
     if run_dcov:
         _calibrate_one("DCOV", "dcov")
         calib_labels.append("DCOV")
+    if run_dcov3:
+        _calibrate_one("DCOV3", "dcov3")
+        calib_labels.append("DCOV3")
+    if run_dcov4:
+        _calibrate_one("DCOV4", "dcov4")
+        calib_labels.append("DCOV4")
     if run_slim:
         for sc in slim_configs:
             lbl = f"SLIM(B={sc['B_M']},m={sc['B_m']})"
@@ -358,6 +382,8 @@ def main():
     if run_tosg: total_runs += 1
     if run_otsg: total_runs += 1
     if run_dcov: total_runs += 1
+    if run_dcov3: total_runs += 1
+    if run_dcov4: total_runs += 1
     if run_slim: total_runs += len(slim_configs)
     runs_done = 0
 
@@ -402,6 +428,30 @@ def main():
             finish_ts = datetime.fromtimestamp(time.time() + rem)
             print(f"  [Overall: {_format_eta(elapsed)} elapsed, "
                   f"{_format_eta(rem)} remaining → done ~{finish_ts.strftime('%H:%M')}]")
+    if run_dcov3:
+        print("\n[*] Running DCOV3...")
+        all_results["dcov3"], all_thetas["dcov3"] = run_repeated_experiment(
+            config, "dcov3", config.n_repeats, init_thetas=_get_init_thetas("dcov3"))
+        runs_done += 1
+        if runs_done < total_runs:
+            elapsed = time.time() - t_start
+            avg = elapsed / runs_done
+            rem = avg * (total_runs - runs_done)
+            finish_ts = datetime.fromtimestamp(time.time() + rem)
+            print(f"  [Overall: {_format_eta(elapsed)} elapsed, "
+                  f"{_format_eta(rem)} remaining → done ~{finish_ts.strftime('%H:%M')}]")
+    if run_dcov4:
+        print("\n[*] Running DCOV4...")
+        all_results["dcov4"], all_thetas["dcov4"] = run_repeated_experiment(
+            config, "dcov4", config.n_repeats, init_thetas=_get_init_thetas("dcov4"))
+        runs_done += 1
+        if runs_done < total_runs:
+            elapsed = time.time() - t_start
+            avg = elapsed / runs_done
+            rem = avg * (total_runs - runs_done)
+            finish_ts = datetime.fromtimestamp(time.time() + rem)
+            print(f"  [Overall: {_format_eta(elapsed)} elapsed, "
+                  f"{_format_eta(rem)} remaining → done ~{finish_ts.strftime('%H:%M')}]")
     if run_slim:
         for sc in slim_configs:
             label = sc["label"]
@@ -423,7 +473,7 @@ def main():
                       f"{_format_eta(rem)} remaining → done ~{finish_ts.strftime('%H:%M')}]")
     t_elapsed = time.time() - t_start
     print(f"\nElapsed: {t_elapsed:.1f} seconds")
-    print_summary_table(all_results)
+    print_summary_table(all_results, config)
 
     x_scale = getattr(cfg, "X_AXIS_SCALE", "log")
 
@@ -436,6 +486,10 @@ def main():
             sp_map[algo_name] = 1
         elif algo_name == "dcov":
             sp_map[algo_name] = config.dcov_B
+        elif algo_name == "dcov3":
+            sp_map[algo_name] = 3
+        elif algo_name == "dcov4":
+            sp_map[algo_name] = 4
         elif algo_name.startswith("slim_"):
             parts = algo_name.split("_")
             bm_val = int(parts[1][1:]) if len(parts) > 1 else 1
@@ -446,18 +500,29 @@ def main():
 
     os.makedirs(outdir, exist_ok=True)
 
-    # Plot 1: same iterations
-    plot_path1 = (os.path.join(outdir, "comparison.png")
-                  if save_plot is None else save_plot)
-    plot_comparison(all_results, save_path=plot_path1, x_scale=x_scale,
-                    title="same iterations")
-
-    # Plot 2: same samples
-    plot_path2 = (os.path.join(outdir, "comparison_samples.png")
-                  if save_plot is None
-                  else save_plot.replace(".png", "_samples.png"))
-    plot_comparison_by_samples(all_results, sp_map, save_path=plot_path2,
-                                x_scale=x_scale)
+    if config.has_known_model:
+        # Known parametric form → show both param error and MSE
+        plot_path1 = (os.path.join(outdir, "comparison.png")
+                      if save_plot is None else save_plot)
+        plot_comparison(all_results, save_path=plot_path1, x_scale=x_scale,
+                        title="same iterations")
+        plot_path2 = (os.path.join(outdir, "comparison_samples.png")
+                      if save_plot is None
+                      else save_plot.replace(".png", "_samples.png"))
+        plot_comparison_by_samples(all_results, sp_map, save_path=plot_path2,
+                                    x_scale=x_scale)
+    else:
+        # Unknown structural form (MLP) → MSE only
+        plot_path1 = (os.path.join(outdir, "comparison.png")
+                      if save_plot is None else save_plot)
+        plot_comparison_mse_only(all_results, save_path=plot_path1, x_scale=x_scale,
+                                 title="same iterations")
+        plot_path2 = (os.path.join(outdir, "comparison_samples.png")
+                      if save_plot is None
+                      else save_plot.replace(".png", "_samples.png"))
+        plot_comparison_mse_only(all_results, sp_map, save_path=plot_path2,
+                                 x_scale=x_scale, title="same samples",
+                                 by_samples=True)
 
     _save_results(outdir, config, all_results, all_thetas, t_elapsed,
                   algo_names, slim_configs, config_path)

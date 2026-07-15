@@ -7,86 +7,83 @@ This file is copied to the results directory for reproducibility.
 """
 
 # ============================================================================
-# 1. Model
+# 1. DGP  (data generating process)
 # ============================================================================
-MODEL = "nn"                 # linear, quadratic, poly2, poly3, nn, sin, sigmoid
+# Modes: "tosg", "otsg", "deepgmm"
+DGP_MODE = "tosg"
+
+# --- tosg ---
+#   z     ~ N(0, I)
+#   h     ~ N(1, I)
+#   eps_x ~ N(0, I),  eps_y ~ N(0, 1)
+#   x = phi(gamma*^T z) + c * (h + eps_x)
+#   y = theta*^T x      + c * (h_1 + eps_y)
+DGP_TOSG_D_X = 8
+DGP_TOSG_D_Z = 16
+DGP_TOSG_NOISE_C = 1.0
+DGP_TOSG_PHI_FUNC = "quadratic"     # "linear" or "quadratic"
+
+# --- otsg ---
+#   eps ~ N(0, sigma_eps^2 I),  nu ~ N(rho * eps_1, 0.25)
+#   x = gamma*^T z + eps
+#   y = theta*^T x + nu
+DGP_OTSG_D_X = 8
+DGP_OTSG_D_Z = 16
+DGP_OTSG_SIGMA_EPS = 0.5          # 0.5 or 1.0
+DGP_OTSG_RHO = 1.0                # 1.0 or 4.0
+
+# --- deepgmm ---
+#   z = (z1, z2) ~ Unif([-3, 3]^2)
+#   eps ~ N(0,1), gamma, delta ~ N(0, 0.1)
+#   x = z1 + eps + gamma
+#   y = h*(x) + eps + delta
+DGP_DEEPGMM_H_STAR = "linear"        # "step", "abs", "linear", "sin"
+DGP_DEEPGMM_HIDDEN_SIZES = [64, 32]  # MLP hidden layers
 
 # ============================================================================
-# 2. Data dimensions
+# 2. Algorithms
 # ============================================================================
-D_X = 4                         # dimension of explanatory variable x
-D_Z = 8                         # dimension of instrument z
+ALGO_LIST = ["dcov3"]
 
-# ============================================================================
-# 3. Data distribution parameters
-# ============================================================================
-MEAN_Z = 0.0                    # mean of instrument z (per component)
-SIGMA_Z = 1.0                   # std  of instrument z (per component)
-SIGMA_C = 0.5                   # std of confounding term c
-SIGMA_Y = 0.3                   # std of noise eps_y
-SIGMA_X = 0.3                   # std of noise eps_x (per component)
+# --- TOSG ---
+ALGO_TOSG_LR = 0.01
+ALGO_TOSG_LR_DECAY = 0.5
 
-# ============================================================================
-# 4. Random seed
-# ============================================================================
-SEED = 1
+# --- OTSG ---
+ALGO_OTSG_THETA_LR = 0.01
+ALGO_OTSG_THETA_LR_DECAY = 0.5
+ALGO_OTSG_GAMMA_LR = 0.01
+ALGO_OTSG_GAMMA_LR_DECAY = 0.5
 
-# ============================================================================
-# 5. Training
-# ============================================================================
-N_ITERATIONS = int(5e6)           # iterations per run (same for all algorithms)
-N_REPEATS = 5                  # number of independent runs
-VERBOSE_EVERY = int(1e5)           # print progress every N iterations
-RESUME_FROM = None              # set to "results/0710-1530" to resume an experiment
-
-# ============================================================================
-# 6. Algorithm selection
-# ============================================================================
-# List of algorithms to run.  Valid entries:
-#   "tosg", "otsg", "dcov", "slim" (all SLIM_CONFIGS variants),
-#   or "all" (runs everything)
-ALGORITHMS = ["otsg", "dcov"]
-
-# ============================================================================
-# 7. TOSG-IVaR hyperparameters
-# ============================================================================
-TOSG_LR = 0.01                  # initial learning rate
-TOSG_LR_DECAY = 0.5             # decay exponent: alpha_t = lr / t^decay
-
-# ============================================================================
-# 8. OTSG-IVaR hyperparameters
-# ============================================================================
-OTSG_THETA_LR = 0.1            # learning rate for theta
-OTSG_THETA_LR_DECAY = 0.5
-OTSG_GAMMA_LR = 0.1            # learning rate for gamma (first-stage)
-OTSG_GAMMA_LR_DECAY = 0.5
-
-# ============================================================================
-# 9. First-Order SLIM hyperparameters
-# ============================================================================
-SLIM_LR = 0.01                  # initial learning rate
-SLIM_LR_DECAY = 0.5             # decay exponent
-
-# Multiple SLIM variants for side-by-side comparison.
-# Each entry: (B_M, B_m, W_type), where
-#   B_M    = batch size for Jacobian estimate M̃
-#   B_m    = batch size for moment estimate m̃
-#   W_type = weighting matrix type: "identity" or "random"
-SLIM_CONFIGS = [
+# --- SLIM ---
+ALGO_SLIM_LR = 0.01
+ALGO_SLIM_LR_DECAY = 0.5
+ALGO_SLIM_CONFIGS = [
     (8,  8,  "identity"),
     (1,  1,  "identity"),
 ]
 
-# ============================================================================
-# 10. Distance Covariance Optimization (DCO) hyperparameters
-# ============================================================================
-DCOV_LR = 0.1                  # initial learning rate
-DCOV_LR_DECAY = 0.5             # decay exponent
-DCOV_B = 4                     # batch size for distance covariance estimate
+# --- DCOV ---
+ALGO_DCOV_LR = 0.1
+ALGO_DCOV_LR_DECAY = 0.5
+ALGO_DCOV_B = 4
+
+# --- DCOV3 ---
+ALGO_DCOV3_LR = 0.1
+ALGO_DCOV3_LR_DECAY = 0.5
+
+# --- DCOV4 ---
+ALGO_DCOV4_LR = 1.0
+ALGO_DCOV4_LR_DECAY = 0.5
 
 # ============================================================================
-# 11. Output
+# 3. Other
 # ============================================================================
-OUTDIR = None                   # None = auto-generate timestamped directory
-SAVE_PLOT = None                # None = save as comparison.png in OUTDIR
-X_AXIS_SCALE = "log"            # "log" or "linear" for convergence plots
+SEED = 10
+N_ITERATIONS = int(2e6)
+N_REPEATS = 10
+VERBOSE_EVERY = int(1e5)
+RESUME_FROM = None
+OUTDIR = None
+SAVE_PLOT = None
+X_AXIS_SCALE = "log"

@@ -1,0 +1,21 @@
+============================================================
+IV Regression Simulation Summary
+============================================================
+Timestamp:   2026-07-06T15:14:00.117987
+Model:       linear
+Dimensions:  d_x=4, d_z=8, d_theta=4
+Z dist:      N(0.0, 1.0^2 I)
+Noise:       sigma_c=0.5, sigma_y=0.3, sigma_x=0.3
+Training:    100 epochs x 5000 samples
+Repeats:     10
+Algorithms:  TOSG-IVaR, OSTG-IVaR, SLIM(B_M=16, B_m=16, W=identity), SLIM(B_M=8, B_m=8, W=identity), SLIM(B_M=1, B_m=1, W=identity)
+Elapsed:     500.9 s
+------------------------------------------------------------
+Algorithm                  Median         Mean+/-Std   Pred MSE (med)
+------------------------------------------------------------
+TOSG                     0.0033     0.0033+/-0.0014         0.3418
+OSTG                     0.0055     0.0053+/-0.0013         0.3411
+SLIM_B16_M16_ID          0.0011     0.0010+/-0.0004         0.3415
+SLIM_B8_M8_ID            0.0014     0.0016+/-0.0005         0.3423
+SLIM_B1_M1_ID            0.0097     0.0099+/-0.0043         0.3404
+============================================================

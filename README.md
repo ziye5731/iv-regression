@@ -4,8 +4,6 @@ This repository contains implementations of several recent methods for instrumen
 
 ## Problem Setting
 
-### General Formulation
-
 In IV regression, our goal is to use $\boldsymbol{x} \in \mathbb{R}^{d_x}$ to regress $y \in \mathbb{R}$.
 The general formulation of IV regression is
 
@@ -17,20 +15,92 @@ y = g(\boldsymbol{\theta}_{*}; \boldsymbol{x}) + \varepsilon_y, \\
 where $`g(\boldsymbol{\theta}_{*}; \cdot)`$ is the true model with parameter $`\boldsymbol{\theta}_{*} \in \mathbb{R}^{d_\theta}`$, $`\varepsilon_y \in \mathbb{R}`$ and $`\boldsymbol{\varepsilon}_{\boldsymbol{x}} \in \mathbb{R}^{d_x}`$ are noises, $`\boldsymbol{z} \in \mathbb{R}^{d_z}`$ is the instrumental variable that is uncorrelated with both $`\varepsilon_y`$ and $`\boldsymbol{\varepsilon}_{\boldsymbol{x}}`$, and $`\boldsymbol{h}(\gamma_{*}; \cdot)`$ is the true model between $`\boldsymbol{x}`$ and $`\boldsymbol{z}`$.
 It should be noted that the explanatory variable $`\boldsymbol{x}`$ is **correlated** with $`\varepsilon_y`$, and consequently, conventional regression methods such as least squares generally fail.
 
-For simulation, we explicitly represent the endogeneity (correlation between $`\boldsymbol{x}`$ and $`\varepsilon_{Y}`$) and formulate the problem as follows
+
+## Data Generating Process
+
+### TOSG
+Independently draw
 
 ```math
-y = g(\boldsymbol{\theta}_{*}; \boldsymbol{x}) + u(\boldsymbol{c}) + \tilde{\varepsilon}_y, \\
-\boldsymbol{x} = \boldsymbol{h}(\gamma_{*} ; \boldsymbol{z}) + v(\boldsymbol{c}) + \tilde{\boldsymbol{\varepsilon}}_{\boldsymbol{x}},
+\boldsymbol{z} \sim N(\boldsymbol{0}_{d_z}, I_{d_z}), \ \boldsymbol{h} \sim N(\boldsymbol{1}_{d_x}, I_{d_x}), \ \boldsymbol{\epsilon}_x \sim N(\boldsymbol{0}_{d_x}, I_{d_x}), \  \epsilon_y \sim N(0, 1).
 ```
 
-where $`\tilde{\varepsilon}_y`$ is the true noise and is uncorrelated with $`\boldsymbol{x}`$.
+Calculate
 
-### Simulation Setting
+```math
+\boldsymbol{x} = \phi(\gamma_*^\top \boldsymbol{z}) + c \cdot (\boldsymbol{h} + \boldsymbol{\epsilon}_x), \\
+\boldsymbol{y} = \boldsymbol{\theta}_*^\top \boldsymbol{x} + c \cdot (h_1, \epsilon_y),
+```
+where $`c > 0`$ is a scalar to control the variance of the noise vector, and $`h_1`$ is the first coordinate of $`h`$.
 
-| Setting | $`g(\boldsymbol{\theta}_{*}; \boldsymbol{x})`$ | $`\boldsymbol{h}(\gamma_{*}; \boldsymbol{z})`$ | $`u(\boldsymbol{c})`$ | $`v(\boldsymbol{c})`$ | $`\boldsymbol{z}`$ | $`\boldsymbol{c}`$ | $`\tilde{\varepsilon}_y`$ | $`\tilde{\boldsymbol{\varepsilon}}_{\boldsymbol{x}}`$ |
-| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| Linear | $`\boldsymbol{\theta}_{*}^\top \boldsymbol{x}`$ | $`\gamma_{*}^\top \boldsymbol{z}`$ | $`c`$ | $`c`$ | $`N(0, \sigma_{z}^2)`$ | $`N(0, \sigma_{c}^2)`$ | $`N(0, \sigma_{y}^2)`$ | $`N(\boldsymbol{0}, \sigma_{x}^2 I)`$ |
+Hyperparameter settings in the paper:
+
+``` math
+\begin{align*}
+(d_x, d_z):& \  (4, 8), (8, 16); \\
+c:& \  0.1, 1.0; \\
+\phi(s):& \ s, s^2.
+\end{align*}
+```
+
+
+### OTSG
+
+Draw:
+
+``` math
+\boldsymbol{\epsilon} \sim  N(\boldsymbol{0},\sigma_{\epsilon}^2 I_{d_x}), \quad  \nu  \sim N(\rho \epsilon_1, 0.25),
+```
+
+where $`\epsilon_1`$ is the first coordinate of $`\boldsymbol{\epsilon}`$.
+Then calculate:
+
+```math
+\boldsymbol{x} = \gamma_*^\top \boldsymbol{z} + \boldsymbol{\epsilon}, \quad
+y = \boldsymbol{\theta_*^\top} \boldsymbol{x} + \nu.
+```
+
+Hyperparameter settings in the paper:
+
+``` math
+\begin{align*}
+(d_x, d_z):& \  (1, 1), (8, 16); \\
+\rho:& \  1.0, 4.0; \\
+\sigma_\epsilon:& \ 0.5, 1.0.
+\end{align*}
+```
+
+
+### DeepGMM
+Independently draw:
+
+```math
+\epsilon \sim N(0,1), \quad \gamma, \delta \sim N(0,0.1), \\
+\boldsymbol{z} = (z_1, z_2) \sim \text{Unif}([-3, 3]^2), \\
+```
+
+then calculate
+
+```math
+x = z_1 + \epsilon + \gamma, \\
+y = h^\star(x) + \epsilon + \delta.
+```
+
+Settings of $h^\star$:
+
+```math
+\begin{align*}
+\text{step}:&  \quad h^\star (x) = I(x>0), \\
+\text{abs}:& \quad h^\star (x) = |x|, \\
+\text{linear}:& \quad h^\star (x) = x, \\
+\text{sin}:& \quad h^\star (x) = \sin(x).
+\end{align*}
+```
+
+
+
+
+
 
 ## Algorithms
 
@@ -140,6 +210,129 @@ The objective is
 
 F(\boldsymbol{\theta}) = \text{dCov}^2(\boldsymbol{z}, Y- g(\boldsymbol{\theta}; \boldsymbol{x}))
 
+```
+
+#### DCOV3
+DCOV3 is an order-3 method to optimize $`F(\boldsymbol{\theta})`$.
+The gradient can be derived by
+
+```math
+\begin{align*}
+\nabla F(\boldsymbol{\theta}) &= \mathbb{E}[\Vert \boldsymbol{z} - \boldsymbol{z}' \Vert \cdot \nabla \vert \varepsilon_y - \varepsilon_y' \vert] 
++ \mathbb{E}[\Vert \boldsymbol{z} - \boldsymbol{z}' \Vert] \cdot \mathbb{E}[\nabla \vert \varepsilon_y - \varepsilon_y' \vert] - 2 \mathbb{E}[\Vert \boldsymbol{z} - \boldsymbol{z}'' \Vert \cdot \nabla \vert \varepsilon_y -\varepsilon_y' \vert ] \\
+
+&=\mathbb{E} \left\{ \big(\Vert \boldsymbol{z} - \boldsymbol{z}' \Vert - 2 \Vert \boldsymbol{z} - \boldsymbol{z}'' \Vert  + \mathbb{E}[\Vert \boldsymbol{z} - \boldsymbol{z}' \Vert] \big)  \cdot  \nabla \vert \varepsilon_y - \varepsilon_y' \vert  \right\}.
+
+\end{align*}
+```
+
+Hence, we can construct an unbiased order-3 stochastic gradient estimator. At iteration $`t`$, three i.i.d. samples
+$`\{(\boldsymbol z_i,\boldsymbol x_i,y_i)\}_{i=1}^3`$ are drawn and the kernel
+
+```math
+v_t(\boldsymbol\theta;i,j,k)
+=
+\left(
+\|\boldsymbol z_i-\boldsymbol z_j\|
+-
+2\|\boldsymbol z_i-\boldsymbol z_k\|
++
+\hat\delta_{t-1}
+\right)
+\operatorname{sgn}(\varepsilon_i-\varepsilon_j)
+\left(
+\nabla g(\boldsymbol\theta;\boldsymbol x_j)
+-
+\nabla g(\boldsymbol\theta;\boldsymbol x_i)
+\right)
+```
+
+is symmetrized over all permutations to obtain the stochastic gradient
+
+```math
+\widehat{\nabla F}(\boldsymbol\theta)
+=
+\frac1{3!}
+\sum_{(i,j,k)!}
+v_t(\boldsymbol\theta;i,j,k).
+```
+
+The parameter is updated by
+
+```math
+\boldsymbol\theta_t
+=
+\boldsymbol\theta_{t-1}
+-
+\alpha_t
+\widehat{\nabla F}(\boldsymbol\theta_{t-1}).
+```
+
+The quantity
+
+```math
+\delta=\mathbb E\|\boldsymbol z-\boldsymbol z'\|
+```
+
+is unknown and is estimated online by the running average of the order-2 U-statistic
+
+```math
+\hat\delta_t
+=
+\frac{t-1}{t}\hat\delta_{t-1}
++
+\frac1t
+\cdot
+\frac1{\binom32}
+\sum_{i<j}
+\|\boldsymbol z_i-\boldsymbol z_j\|.
+```
+
+
+#### DCOV4
+
+We can also construct unbiased gradient estimator via U-statistic.
+
+```math
+\begin{align*}
+\nabla F(\boldsymbol{\theta}) =& \mathbb{E}[\Vert \boldsymbol{z} - \boldsymbol{z}' \Vert \cdot \nabla \vert \varepsilon_y - \varepsilon_y' \vert] 
++ \mathbb{E}[\Vert \boldsymbol{z} - \boldsymbol{z}' \Vert] \cdot \mathbb{E}[\nabla \vert \varepsilon_y - \varepsilon_y' \vert] \\
+&- \mathbb{E}[\Vert \boldsymbol{z} - \boldsymbol{z}'' \Vert \cdot \nabla \vert \varepsilon_y -\varepsilon_y' \vert ] - \mathbb{E}[\Vert \boldsymbol{z} - \boldsymbol{z}'' \Vert \cdot \nabla \vert \varepsilon_y -\varepsilon_y' \vert ].
+
+\end{align*}
+```
+
+The kernel can be defined as
+
+```math
+\begin{align*}
+
+v(\boldsymbol{\theta};i,j,k,l) =& \Vert \boldsymbol{z}_i - \boldsymbol{z}_j \Vert \cdot \nabla \vert \varepsilon_{y,i} - \varepsilon_{y,j} \vert
++ \Vert \boldsymbol{z}_i - \boldsymbol{z}_j \Vert \cdot \nabla \vert \varepsilon_{y,k} - \varepsilon_{y,l} \vert \\
+&- \Vert \boldsymbol{z}_i - \boldsymbol{z}_j \Vert \cdot \nabla \vert \varepsilon_{y,i} -\varepsilon_{y,k} \vert - \Vert \boldsymbol{z}_i - \boldsymbol{z}_k \Vert \cdot \nabla \vert \varepsilon_{y,i} -\varepsilon_{y,j} \vert ,
+
+\end{align*}
+```
+
+and we permute it over $` i,j,k,l `$ to obtain the unbiased gradient estimator
+
+```math
+\widehat{\nabla F}(\boldsymbol\theta)
+=
+\frac1{4!}
+\sum_{(i,j,k,l)!}
+v_t(\boldsymbol\theta;i,j,k,l).
+```
+
+The parameter is updated by
+
+```math
+\boldsymbol\theta_t
+=
+\boldsymbol\theta_{t-1}
+-
+\alpha_t
+\widehat{\nabla F}(\boldsymbol\theta_{t-1}).
 ```
 
 

@@ -1,159 +1,257 @@
 from __future__ import annotations
 
 """
-data_generator.py -- Data generation for IV regression simulation.
+data_generator.py -- Data generation for IV regression.
 
-Data generating process (model-agnostic):
-    y = g(theta*; x) + c + eps_y
-    x = gamma*^T z   + c + eps_x
+TOSG DGP:
+    z     ~ N(0, I)
+    h     ~ N(1, I)
+    eps_x ~ N(0, I),  eps_y ~ N(0, 1)
+    x     = phi(gamma*^T z) + noise_c * (h + eps_x)
+    y     = theta*^T x      + noise_c * (h_1 + eps_y)
 
-Noise distributions:
-    z   ~ N(mean_z * 1, sigma_z^2 I)
-    c   ~ N(0, sigma_c^2)
-    eps_y ~ N(0, sigma_y^2)
-    eps_x ~ N(0, sigma_x^2 I)
+OTSG DGP:
+    eps   ~ N(0, sigma_eps^2 I)
+    nu    ~ N(rho * eps_1, 0.25)
+    x     = gamma*^T z + eps
+    y     = theta*^T x + nu
 
-The confounding term c creates endogeneity: x is correlated
-with the composite error (c + eps_y).  The instrument z is
-uncorrelated with both c and the noises, enabling identification.
+DeepGMM DGP:
+    z     = (z1, z2) ~ Unif([-3, 3]^2)
+    eps   ~ N(0, 1),  gamma, delta ~ N(0, 0.1)
+    x     = z1 + eps + gamma
+    y     = h*(x) + eps + delta
+    h* in {step, abs, linear, sin}
 """
 
 import numpy as np
 from numpy.random import Generator
+from typing import Callable
 
 from .config import SimulationConfig
+from .models import linear_model
 
 
 class IVDataGenerator:
-    """IV regression data generator.
-
-    Generates (z, x, y) triples following the DGP above.
-    Supports batch generation, online streaming, and conditionally-
-    independent paired sampling (needed by TOSG-IVaR).
-
-    Attributes:
-        config: SimulationConfig with model, noise, and dimension specs.
-        rng: NumPy random generator.
-    """
+    """IV regression data generator following the TOSG paper DGP."""
 
     def __init__(self, config: SimulationConfig, seed: int | None = None):
-        """
-        Args:
-            config: simulation configuration.
-            seed: independent seed for this generator (uses config.seed if None).
-        """
         self.config = config
         actual_seed = seed if seed is not None else config.seed
         self.rng: Generator = np.random.default_rng(actual_seed)
+        self.theta_star = config.theta_star
+        self.gamma_star = config.gamma_star
+        self.model = linear_model
 
-        # True parameters
-        self.theta_star = config.theta_star   # (d_theta, 1)
-        self.gamma_star = config.gamma_star   # (d_z, d_x)
-        self.model = config.model             # structural model g
+    def _phi(self, s: np.ndarray) -> np.ndarray:
+        if self.config.phi_func == "linear":
+            return s
+        elif self.config.phi_func == "quadratic":
+            return s ** 2
+        else:
+            raise ValueError(f"Unknown phi_func: {self.config.phi_func}")
 
-    # ------------------------------------------------------------------
-    # Low-level sampling
-    # ------------------------------------------------------------------
-
-    def _sample_z(self, n: int) -> np.ndarray:
-        """Sample instruments z ~ N(mean_z, sigma_z^2 I).  Shape: (n, d_z)."""
-        return self.rng.normal(
-            self.config.mean_z, self.config.sigma_z, size=(n, self.config.d_z)
-        )
-
-    def _sample_c(self, n: int) -> np.ndarray:
-        """Sample confounder c ~ N(0, sigma_c^2).  Shape: (n, 1)."""
-        return self.rng.normal(
-            0, self.config.sigma_c, size=(n, 1)
-        )
-
-    def _sample_noise_y(self, n: int) -> np.ndarray:
-        """Sample true noise eps_y ~ N(0, sigma_y^2).  Shape: (n, 1)."""
-        return self.rng.normal(
-            0, self.config.sigma_y, size=(n, 1)
-        )
-
-    def _sample_noise_x(self, n: int) -> np.ndarray:
-        """Sample true noise eps_x ~ N(0, sigma_x^2 I).  Shape: (n, d_x)."""
-        return self.rng.normal(
-            0, self.config.sigma_x, size=(n, self.config.d_x)
-        )
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
-    def generate_batch(
-        self, n: int
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Generate a batch of n samples (z, x, y).
-
-        Returns:
-            z: (n, d_z) instruments
-            x: (n, d_x) covariates
-            y: (n, 1)   response
-        """
-        z = self._sample_z(n)
-        c = self._sample_c(n)
-        noise_y = self._sample_noise_y(n)
-        noise_x = self._sample_noise_x(n)
-
-        # x = gamma*^T z + c + eps_x
-        x = z @ self.gamma_star + c + noise_x
-
-        # y = g(theta*; x) + c + eps_y
-        y = self.model.predict(self.theta_star, x) + c + noise_y
-
+    def generate_batch(self, n: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        d_z, d_x, c = self.config.d_z, self.config.d_x, self.config.noise_c
+        z = self.rng.normal(0, 1, size=(n, d_z))
+        h = self.rng.normal(1, 1, size=(n, d_x))
+        ex = self.rng.normal(0, 1, size=(n, d_x))
+        ey = self.rng.normal(0, 1, size=(n, 1))
+        x = self._phi(z @ self.gamma_star) + c * (h + ex)
+        y = x @ self.theta_star + c * (h[:, :1] + ey)
         return z, x, y
 
-    def generate_pair(
-        self, z: np.ndarray
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Given z, generate two conditionally independent (x, y) pairs.
-
-        This matches the TOSG-IVaR requirement: for a single z,
-        independently sample two (x, y) pairs (c and noises are
-        drawn independently).
-
-        Args:
-            z: instrument, shape (1, d_z) or (d_z,).
-
-        Returns:
-            x1, y1, x2, y2: two conditionally independent observations.
-        """
-        z = np.atleast_2d(z)  # ensure (1, d_z)
-        n = z.shape[0]
-
-        c1 = self._sample_c(n)
-        c2 = self._sample_c(n)
-        ny1 = self._sample_noise_y(n)
-        ny2 = self._sample_noise_y(n)
-        nx1 = self._sample_noise_x(n)
-        nx2 = self._sample_noise_x(n)
-
-        x1 = z @ self.gamma_star + c1 + nx1
-        y1 = self.model.predict(self.theta_star, x1) + c1 + ny1
-
-        x2 = z @ self.gamma_star + c2 + nx2
-        y2 = self.model.predict(self.theta_star, x2) + c2 + ny2
-
+    def generate_pair(self, z: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        z = np.atleast_2d(z)
+        n, d_x, c = z.shape[0], self.config.d_x, self.config.noise_c
+        h1, h2 = self.rng.normal(1, 1, size=(n, d_x)), self.rng.normal(1, 1, size=(n, d_x))
+        ex1, ex2 = self.rng.normal(0, 1, size=(n, d_x)), self.rng.normal(0, 1, size=(n, d_x))
+        ey1, ey2 = self.rng.normal(0, 1, size=(n, 1)), self.rng.normal(0, 1, size=(n, 1))
+        x1 = self._phi(z @ self.gamma_star) + c * (h1 + ex1)
+        y1 = x1 @ self.theta_star + c * (h1[:, :1] + ey1)
+        x2 = self._phi(z @ self.gamma_star) + c * (h2 + ex2)
+        y2 = x2 @ self.theta_star + c * (h2[:, :1] + ey2)
         return x1, y1, x2, y2
 
     def generate_online(self):
-        """Online generator: yield one sample at a time.
-
-        Yields:
-            (z, x, y): each of shape (1, d).
-        """
+        d_z, d_x, c = self.config.d_z, self.config.d_x, self.config.noise_c
         while True:
-            z = self._sample_z(1)      # (1, d_z)
-            c = self._sample_c(1)      # (1, 1)
-            ny = self._sample_noise_y(1)
-            nx = self._sample_noise_x(1)
-            x = z @ self.gamma_star + c + nx
-            y = self.model.predict(self.theta_star, x) + c + ny
+            z = self.rng.normal(0, 1, size=(1, d_z))
+            h = self.rng.normal(1, 1, size=(1, d_x))
+            ex = self.rng.normal(0, 1, size=(1, d_x))
+            ey = self.rng.normal(0, 1, size=(1, 1))
+            x = self._phi(z @ self.gamma_star) + c * (h + ex)
+            y = x @ self.theta_star + c * (h[:, :1] + ey)
             yield z, x, y
 
     def reset_seed(self, seed: int):
-        """Reset the random seed."""
         self.rng = np.random.default_rng(seed)
+
+
+# ---------------------------------------------------------------------------
+# OTSG Data Generator
+# ---------------------------------------------------------------------------
+
+class OTSGDataGenerator:
+    """IV regression data generator following the OTSG paper DGP.
+
+    DGP:
+        eps   ~ N(0, sigma_eps^2 I_dx)
+        nu    ~ N(rho * eps_1, 0.25)
+        x     = gamma*^T z + eps
+        y     = theta*^T x + nu
+
+    where eps_1 is the first coordinate of eps.
+    """
+
+    def __init__(self, config: SimulationConfig, seed: int | None = None):
+        self.config = config
+        actual_seed = seed if seed is not None else config.seed
+        self.rng: Generator = np.random.default_rng(actual_seed)
+        self.theta_star = config.theta_star
+        self.gamma_star = config.gamma_star
+        self.model = linear_model
+        self.sigma_eps = getattr(config, "otsg_sigma_eps", 0.5)
+        self.rho = getattr(config, "otsg_rho", 1.0)
+
+    def generate_batch(self, n: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        d_z, d_x = self.config.d_z, self.config.d_x
+        z = self.rng.normal(0, 1, size=(n, d_z))
+        eps = self.rng.normal(0, self.sigma_eps, size=(n, d_x))
+        nu = self.rng.normal(self.rho * eps[:, :1], 0.5)  # std=0.5 → var=0.25
+        x = z @ self.gamma_star + eps
+        y = x @ self.theta_star + nu
+        return z, x, y
+
+    def generate_pair(self, z: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Generate two conditionally independent (x,y) pairs given z."""
+        z = np.atleast_2d(z)
+        n, d_x = z.shape[0], self.config.d_x
+        eps1 = self.rng.normal(0, self.sigma_eps, size=(n, d_x))
+        eps2 = self.rng.normal(0, self.sigma_eps, size=(n, d_x))
+        nu1 = self.rng.normal(self.rho * eps1[:, :1], 0.5)
+        nu2 = self.rng.normal(self.rho * eps2[:, :1], 0.5)
+        x1 = z @ self.gamma_star + eps1
+        y1 = x1 @ self.theta_star + nu1
+        x2 = z @ self.gamma_star + eps2
+        y2 = x2 @ self.theta_star + nu2
+        return x1, y1, x2, y2
+
+    def generate_online(self):
+        """Infinite generator yielding one (z, x, y) per step."""
+        d_z, d_x = self.config.d_z, self.config.d_x
+        while True:
+            z = self.rng.normal(0, 1, size=(1, d_z))
+            eps = self.rng.normal(0, self.sigma_eps, size=(1, d_x))
+            nu = self.rng.normal(self.rho * eps[:, :1], 0.5)
+            x = z @ self.gamma_star + eps
+            y = x @ self.theta_star + nu
+            yield z, x, y
+
+    def reset_seed(self, seed: int):
+        self.rng = np.random.default_rng(seed)
+
+
+# ---------------------------------------------------------------------------
+# DeepGMM Data Generator
+# ---------------------------------------------------------------------------
+
+def _make_h_star(h_type: str) -> Callable[[np.ndarray], np.ndarray]:
+    """Build the h*(x) function for DeepGMM DGP."""
+    if h_type == "step":
+        return lambda x: (x > 0).astype(float)
+    elif h_type == "abs":
+        return lambda x: np.abs(x)
+    elif h_type == "linear":
+        return lambda x: x
+    elif h_type == "sin":
+        return lambda x: np.sin(x)
+    else:
+        raise ValueError(f"Unknown h_star type: {h_type}")
+
+
+class DeepGMMDataGenerator:
+    """IV regression data generator following the DeepGMM DGP.
+
+    DGP:
+        z     = (z1, z2) ~ Unif([-3, 3]^2)   → d_z = 2
+        eps   ~ N(0, 1),  gamma, delta ~ N(0, 0.1)
+        x     = z1 + eps + gamma                → d_x = 1 (scalar)
+        y     = h*(x) + eps + delta
+
+    h* is one of: step, abs, linear, sin.
+    The model g(theta; x) is an MLP (unknown structural form).
+    """
+
+    def __init__(self, config: SimulationConfig, seed: int | None = None):
+        self.config = config
+        actual_seed = seed if seed is not None else config.seed
+        self.rng: Generator = np.random.default_rng(actual_seed)
+        h_type = getattr(config, "deepgmm_h_star", "abs")
+        self.h_star = _make_h_star(h_type)
+        # For DeepGMM, model is set externally (MLP), not linear_model
+        self.model = None
+
+    def set_model(self, model):
+        """Set the structural model (MLP) after construction."""
+        self.model = model
+
+    def generate_batch(self, n: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Generate batch of (z, x, y)."""
+        # z ~ Unif([-3, 3]^2)
+        z = self.rng.uniform(-3, 3, size=(n, 2))
+        eps = self.rng.normal(0, 1, size=(n, 1))
+        gamma = self.rng.normal(0, 0.1, size=(n, 1))
+        delta = self.rng.normal(0, 0.1, size=(n, 1))
+        # x = z1 + eps + gamma  (scalar)
+        x = z[:, :1] + eps + gamma
+        # y = h*(x) + eps + delta
+        y = self.h_star(x) + eps + delta
+        return z, x, y
+
+    def generate_pair(self, z: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Generate two conditionally independent (x,y) pairs given z.
+
+        Both pairs share the same z1 instrument but have independent noise.
+        """
+        z = np.atleast_2d(z)
+        n = z.shape[0]
+        z1 = z[:, :1]  # (n, 1)
+        eps1 = self.rng.normal(0, 1, size=(n, 1))
+        eps2 = self.rng.normal(0, 1, size=(n, 1))
+        gamma1 = self.rng.normal(0, 0.1, size=(n, 1))
+        gamma2 = self.rng.normal(0, 0.1, size=(n, 1))
+        delta1 = self.rng.normal(0, 0.1, size=(n, 1))
+        delta2 = self.rng.normal(0, 0.1, size=(n, 1))
+        x1 = z1 + eps1 + gamma1
+        y1 = self.h_star(x1) + eps1 + delta1
+        x2 = z1 + eps2 + gamma2
+        y2 = self.h_star(x2) + eps2 + delta2
+        return x1, y1, x2, y2
+
+    def generate_online(self):
+        """Infinite generator yielding one (z, x, y) per step."""
+        while True:
+            z = self.rng.uniform(-3, 3, size=(1, 2))
+            eps = self.rng.normal(0, 1, size=(1, 1))
+            gamma = self.rng.normal(0, 0.1, size=(1, 1))
+            delta = self.rng.normal(0, 0.1, size=(1, 1))
+            x = z[:, :1] + eps + gamma
+            y = self.h_star(x) + eps + delta
+            yield z, x, y
+
+    def reset_seed(self, seed: int):
+        self.rng = np.random.default_rng(seed)
+
+
+# ---------------------------------------------------------------------------
+# Factory
+# ---------------------------------------------------------------------------
+
+def create_data_generator(config: SimulationConfig, seed: int | None = None):
+    """Create the appropriate data generator for the active DGP.
+
+    Delegates to the DGP descriptor so there is no per-mode branching here.
+    """
+    from .dgp import get_dgp
+    return get_dgp(config.dgp_mode).create_generator(config, seed=seed)

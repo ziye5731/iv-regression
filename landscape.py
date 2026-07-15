@@ -36,12 +36,12 @@ def _load_config_module(config_path: str):
 
 def build_config(cfg) -> SimulationConfig:
     """Build SimulationConfig from landscape config."""
-    config = SimulationConfig(model_name=cfg.MODEL)
+    config = SimulationConfig(phi_func=cfg.MODEL)
     config.d_x = cfg.D_X
     config.d_z = cfg.D_Z
     config.mean_z = cfg.MEAN_Z
     config.sigma_z = cfg.SIGMA_Z
-    config.sigma_c = cfg.SIGMA_C
+    config.noise_c = cfg.SIGMA_C
     config.sigma_y = cfg.SIGMA_Y
     config.sigma_x = cfg.SIGMA_X
     config.seed = cfg.SEED
@@ -311,7 +311,7 @@ def main():
     print("=" * 60)
     print("  IV Regression — Objective Landscape")
     print("=" * 60)
-    print(f"  Model:      {config.model_name}")
+    print(f"  Model:      {config.phi_func}")
     print(f"  Dimensions: d_x = {config.d_x}, d_z = {config.d_z}, "
           f"d_theta = {config.d_theta}")
     print(f"  ||theta*||:  {np.linalg.norm(config.theta_star):.3f}")

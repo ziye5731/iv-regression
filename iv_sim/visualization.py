@@ -26,6 +26,7 @@ COLORS = {
     "dcov": "#7B1FA2",       # purple
     "dco": "#7B1FA2",
     "distance_cov": "#7B1FA2",
+    "dcov3": "#DF94FF",      
     # SLIM default fallback
     "slim": "#2979FF",       # bright blue
     "first_order_slim": "#2979FF",
@@ -51,6 +52,8 @@ LABELS = {
     "dcov": "DCOV",
     "dco": "DCOV",
     "distance_cov": "DCOV",
+    "dcov3": "DCOV3",
+    "dcov4": "DCOV4",
     "slim": "First-Order SLIM",
     "first_order_slim": "First-Order SLIM",
 }
@@ -384,25 +387,129 @@ def plot_comparison_by_samples(
 
 def print_summary_table(
     all_results: dict[str, dict[str, np.ndarray]],
+    config=None,
 ):
-    """Print a final metrics summary table with mean±std and median.
+    """Print a final metrics summary table.
+
+    Delegates formatting to the DGP descriptor so the table layout
+    adapts automatically (e.g. MSE-only for DeepGMM / MLP).
 
     Args:
         all_results: {algo_name: aggregate_repeats() result}.
+        config: optional SimulationConfig; used to look up the DGP descriptor.
     """
+    from .dgp import get_dgp
+
+    if config is not None:
+        dgp = get_dgp(config.dgp_mode)
+    else:
+        # Fallback: use TOSG (default layout)
+        dgp = get_dgp("tosg")
+
     print("\n" + "=" * 80)
-    print(f"{'Algorithm':<22} {'Median':>10} {'Mean±Std':>18} {'Pred MSE (median)':>18}")
+    print(dgp.summary_header())
     print("-" * 80)
     for algo_name, results in all_results.items():
-        final_median = results["param_error_median"][-1]
-        final_mean = results["param_error_mean"][-1]
-        final_std = results["param_error_std"][-1]
-        final_mse_median = results["pred_mse_median"][-1]
-        label = LABELS.get(algo_name.lower(), algo_name)
-        print(
-            f"{label:<22} "
-            f"{final_median:>8.4f}   "
-            f"{final_mean:>8.4f}±{final_std:.4f}   "
-            f"{final_mse_median:>12.4f}"
-        )
+        print(dgp.summary_row(algo_name, results))
     print("=" * 80 + "\n")
+
+
+# ---------------------------------------------------------------------------
+# MSE-only comparison plot (for DeepGMM -- unknown structural form)
+# ---------------------------------------------------------------------------
+
+def plot_comparison_mse_only(
+    all_results: dict[str, dict[str, np.ndarray]],
+    samples_per_step: dict[str, int] | None = None,
+    figsize: tuple = (8, 5),
+    dpi: int = DPI,
+    save_path: str | None = None,
+    use_quantile: bool = True,
+    x_scale: str = "log",
+    title: str = "Same iterations",
+    by_samples: bool = False,
+):
+    """Plot prediction MSE convergence only (no parameter error).
+
+    Used for DeepGMM DGP where the true structural form is unknown and
+    parameter distance to truth is meaningless.
+
+    Args:
+        all_results: {algo_name: aggregate_repeats() result}.
+        samples_per_step: if by_samples=True, {algo_name: int} samples per iter.
+        figsize: figure size.
+        dpi: resolution.
+        save_path: path to save the figure.
+        use_quantile: if True, shade IQR; else shade mean±std.
+        x_scale: "log" or "linear" for x-axis scale.
+        title: subtitle for the figure.
+        by_samples: if True, x-axis is samples seen (not iterations).
+    """
+    fig, ax = plt.subplots(1, 1, figsize=figsize, dpi=dpi)
+
+    if by_samples and samples_per_step:
+        min_sp = min(samples_per_step.values())
+        first_key = next(iter(all_results))
+        n_iter = len(all_results[first_key]["steps"])
+        max_samples = n_iter * min_sp
+        common_grid = np.arange(min_sp, max_samples + 1, min_sp, dtype=float)
+    else:
+        by_samples = False
+
+    for algo_name, results in all_results.items():
+        color, label = _get_color_and_label(algo_name)
+
+        if by_samples and samples_per_step:
+            sp = samples_per_step.get(algo_name, 1)
+            sample_counts = results["steps"].astype(float) * sp
+            keep = sample_counts <= max_samples
+            if not np.any(keep):
+                continue
+            sample_counts = sample_counts[keep]
+            line_raw = results.get("pred_mse_median", results["pred_mse_mean"])[keep]
+            if use_quantile and "pred_mse_q25" in results:
+                lo_raw = results["pred_mse_q25"][keep]
+                hi_raw = results["pred_mse_q75"][keep]
+            else:
+                lo_raw = (results["pred_mse_mean"] - results["pred_mse_std"])[keep]
+                hi_raw = (results["pred_mse_mean"] + results["pred_mse_std"])[keep]
+            if sp == min_sp:
+                line, lo, hi = line_raw, lo_raw, hi_raw
+                x_vals = sample_counts
+            else:
+                line = np.interp(common_grid, sample_counts, line_raw)
+                lo = np.interp(common_grid, sample_counts, lo_raw)
+                hi = np.interp(common_grid, sample_counts, hi_raw)
+                x_vals = common_grid
+        else:
+            if use_quantile and "pred_mse_q25" in results:
+                lo = results["pred_mse_q25"]
+                hi = results["pred_mse_q75"]
+            else:
+                lo = results["pred_mse_mean"] - results["pred_mse_std"]
+                hi = results["pred_mse_mean"] + results["pred_mse_std"]
+            line = results.get("pred_mse_median", results["pred_mse_mean"])
+            x_vals = results["steps"]
+
+        ax.plot(x_vals, line, color=color, linewidth=1.5, label=label)
+        ax.fill_between(x_vals, lo, hi, color=color, alpha=0.1)
+
+    if by_samples:
+        ax.set_xlabel("Samples seen")
+    else:
+        ax.set_xlabel("Iteration")
+    ax.set_ylabel("Prediction MSE")
+    ax.set_title(f"Prediction MSE ({title})")
+    ax.set_yscale("log")
+    ax.set_xscale(x_scale)
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        print(f"Figure saved to: {save_path}")
+        plt.close(fig)
+    else:
+        plt.show()

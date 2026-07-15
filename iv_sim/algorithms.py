@@ -20,6 +20,7 @@ Implements the two IV regression algorithms from the README:
 
 import numpy as np
 from numpy.random import Generator
+from itertools import permutations
 
 from .config import SimulationConfig
 from .data_generator import IVDataGenerator
@@ -137,12 +138,14 @@ class BaseIVAlgorithm:
                 "lr": lr,
             })
             if verbose and self.t % verbose_every == 0:
-                theta_norm = np.linalg.norm(
-                    self.theta - self.config.theta_star
-                )
+                from .dgp import get_dgp
+                dgp = get_dgp(self.config.dgp_mode)
+                metric = dgp.compute_param_metric(self.theta, self.config)
+                label = dgp.param_error_label
+                mse = dgp.compute_pred_mse(self.theta, self.config, generator)
                 print(
                     f"  [step {self.t:6d}] loss={loss:.6f}, "
-                    f"||theta - theta*||={theta_norm:.6f}, lr={lr:.6f}"
+                    f"{label}={metric:.6f}, MSE={mse:.6f}, lr={lr:.6f}"
                 )
         return history
 
@@ -386,8 +389,10 @@ class OTSGIVaR(BaseIVAlgorithm):
         init_theta: np.ndarray | None = None,
     ):
         super().__init__(config, model, seed, init_theta=init_theta)
-        # First-stage parameters: gamma of shape (d_z, d_x)
-        self.gamma = LinearFirstStage.init_params(
+        # First-stage model matches DGP phi_func
+        phi = getattr(config, "phi_func", "linear")
+        self.first_stage = LinearFirstStage(phi_func=phi)
+        self.gamma = self.first_stage.init_params(
             self.rng, config.d_z, config.d_x
         )
 
@@ -424,7 +429,7 @@ class OTSGIVaR(BaseIVAlgorithm):
         z, x, y = next(generator.generate_online())
 
         # First-stage prediction: x_hat = h(gamma_t; z_t)
-        x_hat = LinearFirstStage.predict(self.gamma, z)  # (1, d_x)
+        x_hat = self.first_stage.predict(self.gamma, z)  # (1, d_x)
 
         # --- Theta update ---
         # Prediction error using x_hat
@@ -442,10 +447,9 @@ class OTSGIVaR(BaseIVAlgorithm):
 
         # --- Gamma update ---
         beta = self._gamma_learning_rate()
-        # Residual: h(gamma; z) - x
         residual = x_hat - x                                # (1, d_x)
-        # nabla_gamma h^T * residual = z^T @ residual
-        gamma_update = LinearFirstStage.gamma_update(z, residual)  # (d_z, d_x)
+        gamma_update = self.first_stage.gamma_update(
+            z, residual, self.gamma)                        # (d_z, d_x)
         # Clip
         gu_norm = float(np.linalg.norm(gamma_update))
         if gu_norm > 1e4:
@@ -556,6 +560,186 @@ class DistanceCovOpt(BaseIVAlgorithm):
 
 
 # ---------------------------------------------------------------------------
+# DCOV3  (Order-3 Distance Covariance Optimization)
+# ---------------------------------------------------------------------------
+
+class DCOV3(BaseIVAlgorithm):
+    """DCOV3: Order-3 Distance Covariance Optimization.
+
+    Uses triplets of i.i.d. samples to construct an unbiased stochastic
+    gradient estimator for the distance covariance objective
+    F(θ) = dCov²(z, Y - g(θ; x)).
+
+    Each step draws 3 samples {(z_i, x_i, y_i)}_{i=1}^3, then
+    symmetrizes the kernel v_t(θ; i,j,k) over all 3! = 6 permutations:
+
+        v_t(i,j,k) = (||z_i-z_j|| - 2||z_i-z_k|| + δ̂_{t-1})
+                     · sgn(ε_i - ε_j)
+                     · (∇g(θ; x_j) - ∇g(θ; x_i))
+
+    where ε_i = y_i - g(θ; x_i), and δ̂_t is a running estimate
+    of E||z - z'|| updated online via
+
+        δ̂_t = (t-1)/t · δ̂_{t-1} + 1/t · (1/3) Σ_{i<j} ||z_i - z_j||.
+    """
+
+    def __init__(
+        self,
+        config: SimulationConfig,
+        model: BaseModel | None = None,
+        seed: int | None = None,
+        init_theta: np.ndarray | None = None,
+    ):
+        super().__init__(config, model, seed, init_theta=init_theta)
+        self.delta_hat = 0.0  # running estimate of E||z - z'||
+
+    def _get_lr0(self) -> float:
+        return getattr(self.config, "dcov3_lr", self.config.dcov_lr)
+
+    @property
+    def samples_per_step(self) -> int:
+        return 3
+
+    def _get_lr_decay(self) -> float:
+        return getattr(self.config, "dcov3_lr_decay", self.config.dcov_lr_decay)
+
+    def _step(
+        self, generator: IVDataGenerator, alpha: float
+    ) -> tuple[np.ndarray, float]:
+        """DCOV3 single-step update with order-3 symmetrized gradient."""
+
+        # --- 1. Draw 3 i.i.d. samples ---
+        z, x, y = generator.generate_batch(3)          # (3, d_z), (3, d_x), (3, 1)
+
+        # --- 2. Precompute residuals & gradients ---
+        # ε = y - g(θ; x)  (NOT g(θ;x) - y — sign matters for sgn(·))
+        residuals = (y - self.model.predict(self.theta, x)).ravel()  # (3,)
+        grads = self.model.gradient(self.theta, x)                    # (3, d_theta)
+
+        # --- 3. Pairwise z-distances ---
+        z_diff = z[:, None, :] - z[None, :, :]          # (3, 3, d_z)
+        z_dists = np.linalg.norm(z_diff, axis=-1)       # (3, 3)
+
+        # --- 4. Pairwise z-distances for δ̂ update ---
+        pair_mean = (z_dists[0, 1] + z_dists[0, 2] + z_dists[1, 2]) / 3.0
+
+        # --- 5. Symmetrize over all 6 permutations ---
+        # Use δ̂_{t-1} (NOT yet updated) as the formula specifies.
+        perms = [(0, 1, 2), (0, 2, 1), (1, 0, 2),
+                 (1, 2, 0), (2, 0, 1), (2, 1, 0)]
+
+        grad_F = np.zeros_like(self.theta)                # (d_theta, 1)
+        for i, j, k in perms:
+            z_term = z_dists[i, j] - 2.0 * z_dists[i, k] + self.delta_hat
+            sgn_term = np.sign(residuals[i] - residuals[j])
+            grad_term = grads[j] - grads[i]              # (d_theta,)
+            v = z_term * sgn_term * grad_term.reshape(-1, 1)
+            grad_F += v
+
+        grad_F /= 6.0                                     # average over 6 perms
+
+        # --- 6. Online update of δ̂ (AFTER gradient—uses δ̂_{t-1} above) ---
+        # δ̂_t = (t-1)/t · δ̂_{t-1} + 1/t · (1/3) Σ_{i<j} ||z_i - z_j||
+        self.delta_hat = ((self.t - 1) / self.t) * self.delta_hat + \
+                         (1.0 / self.t) * pair_mean
+
+        # --- 7. Monitoring loss: centred pairwise dCov objective ---
+        r_diff = residuals[:, None] - residuals[None, :]  # (3, 3)
+        R2 = r_diff ** 2
+        D_mean = z_dists.mean()
+        loss = np.mean(z_dists * R2) - D_mean * R2.mean()
+
+        theta_new = self.theta - alpha * grad_F
+
+        return theta_new, loss
+
+
+# ---------------------------------------------------------------------------
+# DCOV4  (Order-4 U-statistic Distance Covariance Optimization)
+# ---------------------------------------------------------------------------
+
+class DCOV4(BaseIVAlgorithm):
+    """DCOV4: Order-4 U-statistic gradient for dCov².
+
+    Uses 4 i.i.d. samples per step and symmetrizes the kernel over all
+    4! = 24 permutations.  Unlike DCOV3, this does NOT require an online
+    estimate of δ = E||z - z'||—the constant term is handled internally
+    by the cross-terms between independent sample indices.
+
+    Kernel (before symmetrisation):
+
+        v(i,j,k,l) =  ||z_i - z_j|| · sgn(ε_i - ε_j) · (∇g_j - ∇g_i)
+                    + ||z_i - z_j|| · sgn(ε_k - ε_l) · (∇g_l - ∇g_k)
+                    - ||z_i - z_j|| · sgn(ε_i - ε_k) · (∇g_k - ∇g_i)
+                    - ||z_i - z_k|| · sgn(ε_i - ε_j) · (∇g_j - ∇g_i)
+
+    ∇̂F = (1 / 4!) Σ_{(i,j,k,l)!} v(i,j,k,l)
+    θ_t = θ_{t-1} - α_t · ∇̂F
+    """
+
+    def __init__(
+        self,
+        config: SimulationConfig,
+        model: BaseModel | None = None,
+        seed: int | None = None,
+        init_theta: np.ndarray | None = None,
+    ):
+        super().__init__(config, model, seed, init_theta=init_theta)
+
+    def _get_lr0(self) -> float:
+        return getattr(self.config, "dcov4_lr", self.config.dcov_lr)
+
+    @property
+    def samples_per_step(self) -> int:
+        return 4
+
+    def _get_lr_decay(self) -> float:
+        return getattr(self.config, "dcov4_lr_decay", self.config.dcov_lr_decay)
+
+    def _step(
+        self, generator: IVDataGenerator, alpha: float
+    ) -> tuple[np.ndarray, float]:
+        """DCOV4 single-step update with order-4 symmetrised gradient."""
+
+        # --- 1. Draw 4 i.i.d. samples ---
+        z, x, y = generator.generate_batch(4)
+
+        # --- 2. Precompute residuals, gradients, pairwise quantities ---
+        residuals = (y - self.model.predict(self.theta, x)).ravel()    # (4,)
+        grads = self.model.gradient(self.theta, x)                     # (4, d_theta)
+
+        z_diff = z[:, None, :] - z[None, :, :]                         # (4, 4, d_z)
+        z_dists = np.linalg.norm(z_diff, axis=-1)                      # (4, 4)
+
+        # sgn[a,b] = sign(ε_a - ε_b),  gdiff[a,b] = ∇g_b - ∇g_a
+        sgn = np.sign(residuals[:, None] - residuals[None, :])          # (4, 4)
+        gdiff = grads[None, :, :] - grads[:, None, :]                   # (4, 4, d_theta)
+
+        # --- 3. All 24 permutations ---
+        perms = list(permutations(range(4)))
+
+        grad_F = np.zeros_like(self.theta)
+        for i, j, k, l in perms:
+            v1 = z_dists[i, j] * sgn[i, j] * gdiff[i, j]               # (d_theta,)
+            v2 = z_dists[i, j] * sgn[k, l] * gdiff[k, l]
+            v3 = -z_dists[i, j] * sgn[i, k] * gdiff[i, k]
+            v4 = -z_dists[i, k] * sgn[i, j] * gdiff[i, j]
+            grad_F += (v1 + v2 + v3 + v4).reshape(-1, 1)
+
+        grad_F /= 24.0
+
+        # --- 4. Monitoring loss ---
+        r_diff = residuals[:, None] - residuals[None, :]                # (4, 4)
+        R2 = r_diff ** 2
+        D_mean = z_dists.mean()
+        loss = np.mean(z_dists * R2) - D_mean * R2.mean()
+
+        theta_new = self.theta - alpha * grad_F
+
+        return theta_new, loss
+
+
+# ---------------------------------------------------------------------------
 # Algorithm registry
 # ---------------------------------------------------------------------------
 
@@ -569,6 +753,8 @@ _ALGO_REGISTRY = {
     "dcov": DistanceCovOpt,
     "dco": DistanceCovOpt,
     "distance_cov": DistanceCovOpt,
+    "dcov3": DCOV3,
+    "dcov4": DCOV4,
 }
 
 
