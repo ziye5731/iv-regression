@@ -73,7 +73,7 @@ ALGO_DCOV3_LR = 0.1
 ALGO_DCOV3_LR_DECAY = 0.5
 
 # --- DCOV4 ---
-ALGO_DCOV4_LR = 1.0
+ALGO_DCOV4_LR = 0.1
 ALGO_DCOV4_LR_DECAY = 0.5
 
 # ============================================================================
