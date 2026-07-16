@@ -44,10 +44,21 @@ class IVDataGenerator:
         self.model = linear_model
 
     def _phi(self, s: np.ndarray) -> np.ndarray:
-        if self.config.phi_func == "linear":
+        f = self.config.phi_func
+        if f == "linear":
             return s
-        elif self.config.phi_func == "quadratic":
+        elif f == "quadratic":
             return s ** 2
+        elif f == "sin":
+            return np.sin(s)
+        elif f == "tanh":
+            return np.tanh(s)
+        elif f == "relu":
+            return np.maximum(0, s)
+        elif f == "sigmoid":
+            return 1.0 / (1.0 + np.exp(-s))
+        elif f == "cubic":
+            return s ** 3
         else:
             raise ValueError(f"Unknown phi_func: {self.config.phi_func}")
 

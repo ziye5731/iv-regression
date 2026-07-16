@@ -79,22 +79,48 @@ class LinearFirstStage:
 
     def predict(self, gamma: np.ndarray, z: np.ndarray) -> np.ndarray:
         s = z @ gamma
-        if self.phi_func == "linear":
+        f = self.phi_func
+        if f == "linear":
             return s
-        elif self.phi_func == "quadratic":
+        elif f == "quadratic":
             return s ** 2
+        elif f == "sin":
+            return np.sin(s)
+        elif f == "tanh":
+            return np.tanh(s)
+        elif f == "relu":
+            return np.maximum(0, s)
+        elif f == "sigmoid":
+            return 1.0 / (1.0 + np.exp(-s))
+        elif f == "cubic":
+            return s ** 3
         else:
             raise ValueError(f"Unknown phi_func: {self.phi_func}")
 
     def gamma_update(self, z: np.ndarray, residual: np.ndarray,
                      gamma: np.ndarray) -> np.ndarray:
-        if self.phi_func == "linear":
-            return z.T @ residual
-        elif self.phi_func == "quadratic":
-            s = z @ gamma
-            return z.T @ (2.0 * s * residual)
+        # General form: gamma_update = z.T @ (phi'(s) * residual)
+        f = self.phi_func
+        s = z @ gamma
+        if f == "linear":
+            phi_prime = np.ones_like(s)
+        elif f == "quadratic":
+            phi_prime = 2.0 * s
+        elif f == "sin":
+            phi_prime = np.cos(s)
+        elif f == "tanh":
+            phi_prime = 1.0 - np.tanh(s) ** 2
+        elif f == "relu":
+            phi_prime = (s > 0).astype(float)
+        elif f == "sigmoid":
+            sig = 1.0 / (1.0 + np.exp(-s))
+            phi_prime = sig * (1.0 - sig)
+        elif f == "cubic":
+            phi_prime = 3.0 * (s ** 2)
         else:
             raise ValueError(f"Unknown phi_func: {self.phi_func}")
+
+        return z.T @ (phi_prime * residual)
 
     @staticmethod
     def init_params(rng: np.random.Generator, d_z: int, d_x: int,

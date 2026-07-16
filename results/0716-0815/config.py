@@ -86,4 +86,4 @@ VERBOSE_EVERY = int(1e5)
 RESUME_FROM = None
 OUTDIR = None
 SAVE_PLOT = None
-X_AXIS_SCALE = "log"  # 'linear', 'log', 'symlog', 'asinh', 'logit', 'function', 'functionlog'
+X_AXIS_SCALE = "linear"  # 'linear', 'log', 'symlog', 'asinh', 'logit', 'function', 'functionlog'

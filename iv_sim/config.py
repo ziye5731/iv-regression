@@ -56,7 +56,7 @@ class SimulationConfig:
 
     # --- TOSG DGP hyperparameters ---
     noise_c: float = 0.5           # noise scale c
-    phi_func: str = "linear"       # first-stage nonlinearity: "linear" or "quadratic"
+    phi_func: str = "linear"       # first-stage nonlinearity: "linear", "quadratic", "sin", "tanh", "relu", "sigmoid", "cubic"
 
     # --- OTSG DGP hyperparameters ---
     otsg_sigma_eps: float = 0.5    # std of eps in first stage

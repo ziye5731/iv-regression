@@ -185,7 +185,7 @@ def run_online_sgd(batch_size=128, lr=0.005, n_repeats=10, n_updates=10000, warm
         dist_matrix[i, :len(h)] = h
 
     steps = np.arange(max_len) * 10
-    median = np.nanmedian(dist_matrix, axis=0)
+    mean = np.nanmean(dist_matrix, axis=0)
     q25 = np.nanpercentile(dist_matrix, 25, axis=0)
     q75 = np.nanpercentile(dist_matrix, 75, axis=0)
 
@@ -193,7 +193,7 @@ def run_online_sgd(batch_size=128, lr=0.005, n_repeats=10, n_updates=10000, warm
     for i in range(n_repeats):
         plt.plot(steps[:len(all_dist_hist[i])], all_dist_hist[i],
                  color='gray', alpha=0.2, linewidth=0.8)
-    plt.plot(steps, median, color='blue', linewidth=2, label='Median')
+    plt.plot(steps, mean, color='blue', linewidth=2, label='Mean')
     plt.fill_between(steps, q25, q75, color='blue', alpha=0.2, label='25%–75% quantile')
     plt.xlabel('SGD update (each uses a batch of new samples)')
     plt.ylabel('Euclidean distance to true parameters')

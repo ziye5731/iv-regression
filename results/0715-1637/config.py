@@ -21,7 +21,7 @@ DGP_MODE = "tosg"
 DGP_TOSG_D_X = 8
 DGP_TOSG_D_Z = 16
 DGP_TOSG_NOISE_C = 1.0
-DGP_TOSG_PHI_FUNC = "linear"     # "linear", "quadratic", "sin", "tanh", "relu", "sigmoid", "cubic"
+DGP_TOSG_PHI_FUNC = "quadratic"     # "linear" or "quadratic"
 
 # --- otsg ---
 #   eps ~ N(0, sigma_eps^2 I),  nu ~ N(rho * eps_1, 0.25)
@@ -37,13 +37,13 @@ DGP_OTSG_RHO = 1.0                # 1.0 or 4.0
 #   eps ~ N(0,1), gamma, delta ~ N(0, 0.1)
 #   x = z1 + eps + gamma
 #   y = h*(x) + eps + delta
-DGP_DEEPGMM_H_STAR = "sin"        # "step", "abs", "linear", "sin"
+DGP_DEEPGMM_H_STAR = "linear"        # "step", "abs", "linear", "sin"
 DGP_DEEPGMM_HIDDEN_SIZES = [64, 32]  # MLP hidden layers
 
 # ============================================================================
 # 2. Algorithms
 # ============================================================================
-ALGO_LIST = ["tosg","otsg","slim"]
+ALGO_LIST = ["dcov","dcov3"]
 
 # --- TOSG ---
 ALGO_TOSG_LR = 0.01
@@ -80,10 +80,10 @@ ALGO_DCOV4_LR_DECAY = 0.5
 # 3. Other
 # ============================================================================
 SEED = 10
-N_ITERATIONS = int(5e5)
-N_REPEATS = 30
+N_ITERATIONS = int(1e6)
+N_REPEATS = 10
 VERBOSE_EVERY = int(1e5)
 RESUME_FROM = None
 OUTDIR = None
 SAVE_PLOT = None
-X_AXIS_SCALE = "log"  # 'linear', 'log', 'symlog', 'asinh', 'logit', 'function', 'functionlog'
+X_AXIS_SCALE = "log"

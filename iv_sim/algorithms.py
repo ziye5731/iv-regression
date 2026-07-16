@@ -466,14 +466,13 @@ class OTSGIVaR(BaseIVAlgorithm):
 class DistanceCovOpt(BaseIVAlgorithm):
     """Distance Covariance Optimization for IV regression.
 
-    Minimizes a centered pairwise-distance objective that drives z and
+    Minimizes the true distance covariance objective that drives z and
     residual r(θ) = y - g(θ; x) toward independence.  For a batch of B:
 
-        D_{ij} = ||z_i - z_j||,   R2_{ij} = (r_i - r_j)^2
-        F = mean(D * R2) - mean(D) * mean(R2)
+        D_{ij} = ||z_i - z_j||,   |r|_{ij} = |r_i - r_j|
+        F = mean(D · |r|) - mean(D) · mean(|r|)
 
-    This is zero when z ⟂ r.  The gradient uses smooth squared
-    differences (no sign function), making it amenable to SGD.
+    F = 0  ⇔  z ⟂ r.  The gradient uses sgn(r_i - r_j).
 
     Reference: Székely et al. (2007), Annals of Statistics.
     """
@@ -532,19 +531,18 @@ class DistanceCovOpt(BaseIVAlgorithm):
         pred = self.model.predict(self.theta, x)           # (B, 1)
         r_flat = (pred - y).ravel()                        # (B,)
         r_diff = r_flat[:, None] - r_flat[None, :]         # (B, B)
-        R2 = r_diff ** 2                                   # (B, B)
+        R2 = np.abs(r_diff)                                 # |r_i - r_j|  (true dCov)
 
         # --- 4. Centered gradient ---
-        # ∂F/∂θ = (2/B²) * ∇g^T @ [ (D - mean(D)) ⊙ (r_i - r_j) ] @ 1 · 2
-        # (The factor of 2 comes from ∂(r_i - r_j)^2/∂θ)
+        # ∇_θ |r_i - r_j| = sgn(r_i - r_j)·(∇g_i - ∇g_j)
+        # ∇F = (2/B²) Σ_ij (D_ij - D̄) · sgn(r_i - r_j) · ∇g_i   [by symmetry]
         D_mean = D_raw.mean()
         D_centered = D_raw - D_mean                        # (B, B)
-        # Weight each sample by centered distance * residual diff
-        weights = D_centered * r_diff                      # (B, B)
+        weights = D_centered * np.sign(r_diff)              # (B, B)
         w_sum = weights.sum(axis=1, keepdims=True)         # (B, 1)
 
         grad_g = self.model.gradient(self.theta, x)        # (B, d_theta)
-        grad_F = (4.0 / (B * B)) * (grad_g.T @ w_sum)      # (d_theta, 1)
+        grad_F = (2.0 / (B * B)) * (grad_g.T @ w_sum)      # (d_theta, 1)
 
         # --- 5. Gradient normalization ---
         gnorm = float(np.linalg.norm(grad_F))
@@ -612,7 +610,7 @@ class DCOV3(BaseIVAlgorithm):
         z, x, y = generator.generate_batch(3)          # (3, d_z), (3, d_x), (3, 1)
 
         # --- 2. Precompute residuals & gradients ---
-        residuals = (self.model.predict(self.theta, x) - y).ravel()  # (3,)
+        residuals = (y - self.model.predict(self.theta, x)).ravel()  # (3,)
         grads = self.model.gradient(self.theta, x)                    # (3, d_theta)
 
         # --- 3. Pairwise z-distances ---
@@ -629,7 +627,7 @@ class DCOV3(BaseIVAlgorithm):
 
         grad_F = np.zeros_like(self.theta)                # (d_theta, 1)
         for i, j, k in perms:
-            z_term = z_dists[i, j] - 2.0 * z_dists[i, k] # + self.delta_hat
+            z_term = z_dists[i, j] - 2.0 * z_dists[i, k] + self.delta_hat
             sgn_term = np.sign(residuals[i] - residuals[j])
             grad_term = grads[j] - grads[i]              # (d_theta,)
             v = z_term * sgn_term * grad_term.reshape(-1, 1)
@@ -644,7 +642,7 @@ class DCOV3(BaseIVAlgorithm):
 
         # --- 7. Monitoring loss: centred pairwise dCov objective ---
         r_diff = residuals[:, None] - residuals[None, :]  # (3, 3)
-        R2 = r_diff ** 2
+        R2 = np.abs(r_diff)
         D_mean = z_dists.mean()
         loss = np.mean(z_dists * R2) - D_mean * R2.mean()
 
@@ -704,7 +702,7 @@ class DCOV4(BaseIVAlgorithm):
         z, x, y = generator.generate_batch(4)
 
         # --- 2. Precompute residuals, gradients, pairwise quantities ---
-        residuals = (self.model.predict(self.theta, x) - y).ravel()    # (4,)
+        residuals = (y-self.model.predict(self.theta, x)).ravel()    # (4,)
         grads = self.model.gradient(self.theta, x)                     # (4, d_theta)
 
         z_diff = z[:, None, :] - z[None, :, :]                         # (4, 4, d_z)
@@ -729,7 +727,7 @@ class DCOV4(BaseIVAlgorithm):
 
         # --- 4. Monitoring loss ---
         r_diff = residuals[:, None] - residuals[None, :]                # (4, 4)
-        R2 = r_diff ** 2
+        R2 = np.abs(r_diff)
         D_mean = z_dists.mean()
         loss = np.mean(z_dists * R2) - D_mean * R2.mean()
 

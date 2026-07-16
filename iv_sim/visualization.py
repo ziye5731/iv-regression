@@ -131,9 +131,9 @@ def plot_convergence(
         hi2 = results["pred_mse_mean"] + results["pred_mse_std"]
         band_label = "mean ± std"
 
-    # Use median for the line if available, else mean
-    line1 = results.get("param_error_median", results["param_error_mean"])
-    line2 = results.get("pred_mse_median", results["pred_mse_mean"])
+    # Use mean for the central curve (prefer mean over median for plotted lines)
+    line1 = results["param_error_mean"]
+    line2 = results["pred_mse_mean"]
 
     # --- Left: parameter L2 error ---
     ax1.plot(
@@ -215,8 +215,9 @@ def plot_comparison(
             hi1 = results["param_error_mean"] + results["param_error_std"]
             lo2 = results["pred_mse_mean"] - results["pred_mse_std"]
             hi2 = results["pred_mse_mean"] + results["pred_mse_std"]
-        line1 = results.get("param_error_median", results["param_error_mean"])
-        line2 = results.get("pred_mse_median", results["pred_mse_mean"])
+        # Use mean for the central curve
+        line1 = results["param_error_mean"]
+        line2 = results["pred_mse_mean"]
 
         # Parameter error
         ax1.plot(
@@ -330,8 +331,9 @@ def plot_comparison_by_samples(
             hi1_raw = (results["param_error_mean"] + results["param_error_std"])[keep]
             lo2_raw = (results["pred_mse_mean"] - results["pred_mse_std"])[keep]
             hi2_raw = (results["pred_mse_mean"] + results["pred_mse_std"])[keep]
-        line1_raw = results.get("param_error_median", results["param_error_mean"])[keep]
-        line2_raw = results.get("pred_mse_median", results["pred_mse_mean"])[keep]
+        # Use mean (not median) for the raw line values when plotting by samples
+        line1_raw = results["param_error_mean"][keep]
+        line2_raw = results["pred_mse_mean"][keep]
 
         # Interpolate to common grid
         if sp == min_sp:
@@ -466,7 +468,7 @@ def plot_comparison_mse_only(
             if not np.any(keep):
                 continue
             sample_counts = sample_counts[keep]
-            line_raw = results.get("pred_mse_median", results["pred_mse_mean"])[keep]
+            line_raw = results["pred_mse_mean"][keep]
             if use_quantile and "pred_mse_q25" in results:
                 lo_raw = results["pred_mse_q25"][keep]
                 hi_raw = results["pred_mse_q75"][keep]
@@ -488,7 +490,7 @@ def plot_comparison_mse_only(
             else:
                 lo = results["pred_mse_mean"] - results["pred_mse_std"]
                 hi = results["pred_mse_mean"] + results["pred_mse_std"]
-            line = results.get("pred_mse_median", results["pred_mse_mean"])
+            line = results["pred_mse_mean"]
             x_vals = results["steps"]
 
         ax.plot(x_vals, line, color=color, linewidth=1.5, label=label)
