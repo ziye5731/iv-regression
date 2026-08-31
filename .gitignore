@@ -216,3 +216,15 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+
+# MacOS
+.DS_Store
+.vscode/
+
+# Results
+results/
+landscapes/
+
+# Drafts
+playground/
