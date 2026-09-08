@@ -277,7 +277,7 @@ class QuadraticDataGenerator:
         z ~ N(0, I_dz),
         c ~ N(0, rho I_dx)
         x = gamma*^T z + c + eps_x
-        y = g(theta*; x) + 1^T c + eps_y
+        y = g(theta*; x) + (1/sqrt(d_x)) * 1^T c + eps_y
 
     Here g(theta; x) is implemented by `QuadraticModel` in `iv_sim.models`.
     """
@@ -291,6 +291,10 @@ class QuadraticDataGenerator:
         from .models import QuadraticModel
         self.model = QuadraticModel()
         self.rho = getattr(config, "quadratic_rho", 0.5)
+        # Normalize the aggregate confounder:  Var(1^T c / sqrt(d_x)) = rho is
+        # then independent of d_x, so the endogeneity strength does not grow
+        # with the dimension (and is comparable across DGPs).
+        self.c_scale = 1.0 / np.sqrt(self.config.d_x)
 
     def generate_batch(self, n: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         d_z, d_x = self.config.d_z, self.config.d_x
@@ -300,7 +304,8 @@ class QuadraticDataGenerator:
         eps_y = self.rng.normal(0, 1.0, size=(n, 1))
         x = z @ self.gamma_star + c + eps_x
         # g(theta; x) is produced by the QuadraticModel
-        y = self.model.predict(self.theta_star, x) + np.sum(c, axis=1, keepdims=True) + eps_y
+        y = (self.model.predict(self.theta_star, x)
+             + self.c_scale * np.sum(c, axis=1, keepdims=True) + eps_y)
         return z, x, y
 
     def generate_pair(self, z: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -314,8 +319,10 @@ class QuadraticDataGenerator:
         eps_y2 = self.rng.normal(0, 1.0, size=(n, 1))
         x1 = z @ self.gamma_star + c1 + eps_x1
         x2 = z @ self.gamma_star + c2 + eps_x2
-        y1 = self.model.predict(self.theta_star, x1) + np.sum(c1, axis=1, keepdims=True) + eps_y1
-        y2 = self.model.predict(self.theta_star, x2) + np.sum(c2, axis=1, keepdims=True) + eps_y2
+        y1 = (self.model.predict(self.theta_star, x1)
+              + self.c_scale * np.sum(c1, axis=1, keepdims=True) + eps_y1)
+        y2 = (self.model.predict(self.theta_star, x2)
+              + self.c_scale * np.sum(c2, axis=1, keepdims=True) + eps_y2)
         return x1, y1, x2, y2
 
     def generate_online(self):
@@ -325,9 +332,34 @@ class QuadraticDataGenerator:
             c = self.rng.normal(0, np.sqrt(self.rho), size=(1, self.config.d_x))
             eps_y = self.rng.normal(0, 1.0, size=(1, 1))
             x = z @ self.gamma_star + c + eps_x
-            y = self.model.predict(self.theta_star, x) + np.sum(c, axis=1, keepdims=True) + eps_y
+            y = (self.model.predict(self.theta_star, x)
+                 + self.c_scale * np.sum(c, axis=1, keepdims=True) + eps_y)
             yield z, x, y
 
     def reset_seed(self, seed: int):
         self.rng = np.random.default_rng(seed)
+
+
+class LogisticDataGenerator(QuadraticDataGenerator):
+    """Data generator for the Logistic DGP described in README.
+
+    DGP:
+        eps_x ~ N(0, (1-rho) I_dx),
+        z ~ N(0, I_dz),
+        c ~ N(0, rho I_dx)
+        x = gamma*^T z + c + eps_x
+        y = g(theta*; x) + (1/sqrt(d_x)) * 1^T c + eps_y
+
+    where g(theta; x) = sigmoid(theta^T x) is implemented by
+    `LogisticModel` in `iv_sim.models`.  The sampling logic is identical to
+    the Quadratic DGP (same first stage / confounder / noise structure), so it
+    is inherited from QuadraticDataGenerator; only the structural model and the
+    rho config attribute differ.
+    """
+
+    def __init__(self, config: SimulationConfig, seed: int | None = None):
+        super().__init__(config, seed=seed)
+        from .models import LogisticModel
+        self.model = LogisticModel()
+        self.rho = getattr(config, "logistic_rho", 0.5)
 

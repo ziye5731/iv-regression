@@ -13,6 +13,21 @@ from abc import ABC, abstractmethod
 from typing import List, Optional
 
 
+def _stable_sigmoid(s: np.ndarray) -> np.ndarray:
+    """Numerically stable logistic sigmoid 1 / (1 + exp(-s)).
+
+    Uses the s >= 0 / s < 0 branch split to avoid overflow in exp().
+    """
+    out = np.empty_like(s, dtype=float)
+    pos = s >= 0
+    if np.any(pos):
+        out[pos] = 1.0 / (1.0 + np.exp(-s[pos]))
+    if np.any(~pos):
+        e = np.exp(s[~pos])
+        out[~pos] = e / (1.0 + e)
+    return out
+
+
 class BaseModel(ABC):
     """Abstract base class for the structural equation g(theta; x)."""
 
@@ -142,6 +157,38 @@ class QuadraticModel(BaseModel):
                 idx += 1
         return A
 
+
+class LogisticModel(BaseModel):
+    """Logistic (sigmoid) structural model.
+
+    Parameterization:
+        g(theta; x) = sigma(theta^T x) = 1 / (1 + exp(-theta^T x))
+
+    with theta of shape (d_x, 1) and predictions of shape (n, 1).
+    Derivative used by gradient descent:
+        dg/dtheta = sigma(theta^T x) * (1 - sigma(theta^T x)) * x
+    """
+
+    def predict(self, theta: np.ndarray, x: np.ndarray) -> np.ndarray:
+        theta_2d = np.atleast_2d(theta.reshape(-1, 1))  # (d_x, 1)
+        s = x @ theta_2d                                 # (n, 1)
+        return _stable_sigmoid(s)
+
+    def gradient(self, theta: np.ndarray, x: np.ndarray) -> np.ndarray:
+        theta_2d = np.atleast_2d(theta.reshape(-1, 1))  # (d_x, 1)
+        s = x @ theta_2d                                 # (n, 1)
+        sig = _stable_sigmoid(s)                         # (n, 1)
+        # d sigma/d theta per sample = sig*(1-sig) * x  -> (n, d_x)
+        return (sig * (1.0 - sig)) * x
+
+    def init_params(self, rng: np.random.Generator, d_x: int) -> np.ndarray:
+        return rng.normal(0, 0.1, size=(d_x, 1))
+
+    def true_params(self, rng: np.random.Generator, d_x: int) -> np.ndarray:
+        return rng.normal(0, 1.0, size=(d_x, 1))
+
+    def param_dim(self, d_x: int) -> int:
+        return d_x
 
 
 class LinearFirstStage:

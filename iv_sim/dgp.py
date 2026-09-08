@@ -310,7 +310,7 @@ class QuadraticDGP(BaseDGP):
         c ~ N(0, rho I_dx)
 
     x = gamma*^T z + c + eps_x
-    y = g(theta*; x) + 1^T c + eps_y
+    y = g(theta*; x) + (1/sqrt(d_x)) * 1^T c + eps_y
     where g is the QuadraticModel in `iv_sim.models`.
     """
 
@@ -337,8 +337,51 @@ class QuadraticDGP(BaseDGP):
         return gen
 
 
+class LogisticDGP(BaseDGP):
+    """Logistic DGP from README.
+
+    Draw:
+        eps_x ~ N(0, (1-rho) I_dx),
+        z ~ N(0, I_dz),
+        c ~ N(0, rho I_dx)
+
+    x = gamma*^T z + c + eps_x
+    y = g(theta*; x) + (1/sqrt(d_x)) * 1^T c + eps_y
+    where g is the LogisticModel (sigmoid) in `iv_sim.models`.
+    """
+
+    dgp_mode = "logistic"
+
+    def configure(self, config, cfg):
+        config.d_x = getattr(cfg, "DGP_LOGISTIC_D_X", getattr(cfg, "DGP_D_X", 5))
+        config.d_z = getattr(cfg, "DGP_LOGISTIC_D_Z", getattr(cfg, "DGP_D_Z", 5))
+        config.logistic_rho = getattr(cfg, "DGP_LOGISTIC_RHO", 0.5)
+        config.gamma_scale = getattr(cfg, "DGP_LOGISTIC_GAMMA_SCALE", 1.0)
+
+    def setup_model(self, config, rng):
+        from .models import LogisticModel
+        config.model = LogisticModel()
+        if config.theta_star is None:
+            config.theta_star = config.model.true_params(rng, config.d_x)
+        if config.gamma_star is None:
+            config.gamma_star = rng.normal(0, 1, size=(config.d_z, config.d_x))
+        config.gamma_star *= config.gamma_scale
+
+    def create_generator(self, config, seed=None):
+        from .data_generator import LogisticDataGenerator
+        gen = LogisticDataGenerator(config, seed=seed)
+        return gen
+
+    def summary_dgp_line(self, config):
+        return (f"DGP:         Logistic, rho={config.logistic_rho}, "
+                f"gamma_scale={config.gamma_scale}")
+
+
 # register Quadratic
 _DGP_REGISTRY["quadratic"] = QuadraticDGP()
+
+# register Logistic
+_DGP_REGISTRY["logistic"] = LogisticDGP()
 
 
 def get_dgp(mode: str) -> BaseDGP:

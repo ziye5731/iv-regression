@@ -9,8 +9,8 @@ This file is copied to the results directory for reproducibility.
 # ============================================================================
 # 1. DGP  (data generating process)
 # ============================================================================
-# Modes: "tosg", "otsg", "deepgmm", "quadratic"
-DGP_MODE = "quadratic"
+# Modes: "tosg", "otsg", "deepgmm", "quadratic", "logistic"
+DGP_MODE = "logistic"
 
 # --- tosg ---
 #   z     ~ N(0, I)
@@ -39,11 +39,22 @@ DGP_OTSG_GAMMA_SCALE = 1.0       # scales gamma* (IV strength; larger → strong
 #   z ~ N(0, I_dz),
 #   c ~ N(0, rho I_dx)
 #   x = gamma*^T z + c + eps_x
-#   y = g(theta*; x) + 1^T c + eps_y
+#   y = g(theta*; x) + (1/sqrt(d_x)) 1^T c + eps_y
 DGP_QUADRATIC_D_X = 4
 DGP_QUADRATIC_D_Z = 8
 DGP_QUADRATIC_RHO = 0.5
 DGP_QUADRATIC_GAMMA_SCALE = 1.0  # scales gamma* (IV strength; larger → stronger instruments)
+
+# --- logistic ---
+#   eps_x ~ N(0, (1-rho) I_dx),
+#   z ~ N(0, I_dz),
+#   c ~ N(0, rho I_dx)
+#   x = gamma*^T z + c + eps_x
+#   y = sigmoid(theta*^T x) + (1/sqrt(d_x)) 1^T c + eps_y
+DGP_LOGISTIC_D_X = 4
+DGP_LOGISTIC_D_Z = 8
+DGP_LOGISTIC_RHO = 0.5
+DGP_LOGISTIC_GAMMA_SCALE = 1.0  # scales gamma* (IV strength; larger → stronger instruments)
 
 # --- deepgmm ---
 #   z = (z1, z2) ~ Unif([-3, 3]^2)
@@ -105,7 +116,7 @@ ALGO_SIEVE_EMA = 0.0           # >0 -> EMA rate for preconditioner; 0 -> running
 # 3. Other
 # ============================================================================
 SEED = 10
-N_ITERATIONS = int(1e8)
+N_ITERATIONS = int(5e7)
 N_REPEATS = 1
 VERBOSE_EVERY = int(1e5)
 HISTORY_EVERY = None          # record training history every N iterations

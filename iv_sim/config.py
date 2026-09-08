@@ -15,10 +15,12 @@ from .models import BaseModel, linear_model, MLPModel
 class SimulationConfig:
     """Simulation configuration for IV regression.
 
-    Supports three DGP modes:
-      - "tosg":    TOSG paper DGP (two-sample oracle with phi nonlinearity)
-      - "otsg":    OTSG paper DGP (one-sample with endogeneity via rho)
-      - "deepgmm": DeepGMM DGP (unknown h*; use MLP model)
+    Supports multiple DGP modes:
+      - "tosg":      TOSG paper DGP (two-sample oracle with phi nonlinearity)
+      - "otsg":      OTSG paper DGP (one-sample with endogeneity via rho)
+      - "deepgmm":   DeepGMM DGP (unknown h*; use MLP model)
+      - "quadratic": quadratic structural form g(theta; x)
+      - "logistic":  sigmoid structural form g(theta; x)
 
     TOSG DGP:
         z     ~ N(0, I)
@@ -41,7 +43,7 @@ class SimulationConfig:
     """
 
     # --- DGP mode ---
-    dgp_mode: str = "tosg"   # "tosg", "otsg", "deepgmm"
+    dgp_mode: str = "tosg"   # "tosg", "otsg", "deepgmm", "quadratic", "logistic"
 
     # --- Data dimensions ---
     d_x: int = 5          # dimension of x
@@ -67,7 +69,7 @@ class SimulationConfig:
     deepgmm_hidden_sizes: list = field(default_factory=lambda: [64, 32])  # MLP hidden layers
 
     # --- IV strength ---
-    gamma_scale: float = 1.0           # scales gamma_star for TOSG, OTSG, Quadratic
+    gamma_scale: float = 1.0           # scales gamma_star for TOSG, OTSG, Quadratic, Logistic
     deepgmm_iv_strength: float = 1.0   # scales z1 coefficient for DeepGMM
 
     # --- Algorithm parameters ---

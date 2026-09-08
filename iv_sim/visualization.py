@@ -21,13 +21,14 @@ COLORS = {
     # TOSG/OTSG/DCOV: warm family
     "tosg": "#FF9646",       # orange
     "tosg_ivar": "#FF9646",
-    "otsg": "#810000",       # dark red
+    "otsg": "#D45C5C",       # dark red
     "otsg_ivar": "#810000",
     "dcov": "#FF4081",       # purple
     "dco": "#FF4081",
     "distance_cov": "#7B1FA2",
     "dcov3": "#DF94FF",
     "dcov4": "#7B1FA2",    # magenta / 桃红色
+    "sieve": "#088122",
     # SLIM default fallback
     "slim": "#2979FF",       # bright blue
     "first_order_slim": "#2979FF",
@@ -57,6 +58,7 @@ LABELS = {
     "dcov4": "DCOV4",
     "slim": "First-Order SLIM",
     "first_order_slim": "First-Order SLIM",
+    "sieve": "SieveGMM",
 }
 
 FIG_SIZE = (10, 5)
@@ -297,15 +299,20 @@ def plot_comparison_by_samples(
     # Minimum samples per step (baseline: online, 1 sample/step)
     min_sp = min(samples_per_step.values())
 
-    # Determine the common sample-count grid
-    # All algorithms ran for the same iterations, so each has the same
-    # number of history points.  The baseline (min_sp) sees:
-    #   max_samples = n_iter * min_sp
+    # Determine the common sample-count grid.
+    # All algorithms ran for the same total number of iterations and recorded
+    # history at the same steps, so the shared sample budget is the one of the
+    # cheapest method:  max_samples = (final recorded step) * min_sp.
+    # NOTE: the budget must use the *final step value*, not the number of
+    # recorded points.  When history is stored at log-spaced checkpoints
+    # (X_AXIS_SCALE = "log") these differ by orders of magnitude, and using
+    # len(steps) wrongly collapses the whole plot to the first few samples.
     first_key = next(iter(all_results))
-    n_iter = len(all_results[first_key]["steps"])
-    max_samples = n_iter * min_sp
-    # Common grid: every `min_sp` samples (matching the baseline's steps)
-    common_grid = np.arange(min_sp, max_samples + 1, min_sp, dtype=float)
+    steps_common = all_results[first_key]["steps"]
+    max_samples = int(steps_common[-1]) * min_sp
+    # Common grid: the baseline's sample count at each recorded step.
+    # Works both for dense histories and for log-spaced checkpoints.
+    common_grid = steps_common.astype(float) * min_sp
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize, dpi=dpi)
 
@@ -453,9 +460,12 @@ def plot_comparison_mse_only(
     if by_samples and samples_per_step:
         min_sp = min(samples_per_step.values())
         first_key = next(iter(all_results))
-        n_iter = len(all_results[first_key]["steps"])
-        max_samples = n_iter * min_sp
-        common_grid = np.arange(min_sp, max_samples + 1, min_sp, dtype=float)
+        steps_common = all_results[first_key]["steps"]
+        # Budget = (final recorded step) * min_sp.  Use the step *value*, not
+        # len(steps): with log-spaced checkpoints len(steps) << last step and
+        # the previous code collapsed the plot to the first few samples.
+        max_samples = int(steps_common[-1]) * min_sp
+        common_grid = steps_common.astype(float) * min_sp
     else:
         by_samples = False
 

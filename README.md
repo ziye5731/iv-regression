@@ -110,7 +110,23 @@ Calculate
 
 ```math
 \boldsymbol{x} = \gamma_*^\top \boldsymbol{z} + \boldsymbol{c} + \boldsymbol{\varepsilon}_x, \\
-y = (\boldsymbol{x} + \boldsymbol{\theta}_*)^\top (\boldsymbol{x} + \boldsymbol{\theta}_*) + \boldsymbol{1}_{d_x}^\top \boldsymbol{c} +  \varepsilon_y.
+y = (\boldsymbol{x} + \boldsymbol{\theta}_*)^\top (\boldsymbol{x} + \boldsymbol{\theta}_*) + \frac{1}{\sqrt{d_x}} \boldsymbol{1}_{d_x}^\top \boldsymbol{c} +  \varepsilon_y.
+```
+
+
+### Logistic
+
+Independently draw:
+
+```math
+\boldsymbol{\varepsilon}_x \sim N(\boldsymbol{0}_{d_x}, (1 - \rho) I_{d_x}), \quad \boldsymbol{z} \sim N(\boldsymbol{0}_{d_z}, I_{d_z}), \quad \boldsymbol{c} \sim N(\boldsymbol{0}_{d_x}, \rho I_{d_x})
+```
+
+Calculate
+
+```math
+\boldsymbol{x} = \gamma_*^\top \boldsymbol{z} + \boldsymbol{c} + \boldsymbol{\varepsilon}_x, \\
+y = \left[ 1 + \exp \left( -  \boldsymbol{\theta}_*^\top \boldsymbol{x} \right) \right]^{-1} + \frac{1}{\sqrt{d_x}} \boldsymbol{1}_{d_x}^\top \boldsymbol{c} +  \varepsilon_y.
 ```
 
 
