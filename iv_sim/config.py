@@ -72,6 +72,15 @@ class SimulationConfig:
     gamma_scale: float = 1.0           # scales gamma_star for TOSG, OTSG, Quadratic, Logistic
     deepgmm_iv_strength: float = 1.0   # scales z1 coefficient for DeepGMM
 
+    # --- Structural-noise / scaling knobs (defaults reproduce the README DGPs) ---
+    noise_eps_y: float = 1.0            # std of the exogenous outcome noise eps_y
+    c_coef: float = 1.0                 # coefficient on (1/sqrt(d_x)) 1^T c in y (endogeneity)
+    quadratic_theta_scale: float = 1.0  # scales theta* in the Quadratic DGP
+    logistic_theta_scale: float = 1.0   # scales theta* in the Logistic DGP
+    expiv_index_scale: float = 1.0      # target std of theta*^T x in the ExpIV DGP
+    probit_index_scale: float = 1.0     # target std of theta*^T x in the Probit DGP
+    sine_theta_scale: float = 1.0       # scales theta* in the Sine DGP
+
     # --- Algorithm parameters ---
     tosg_lr: float = 0.01
     tosg_lr_decay: float = 0.5
@@ -106,6 +115,20 @@ class SimulationConfig:
     sieve_clip: float = 10.0       # cap on per-step parameter displacement
     sieve_W_type: str = "diag"     # "diag" (inverse-variance) or "identity"
     sieve_ema: float = 0.0         # >0 -> EMA rate for preconditioner; 0 -> running average
+
+    # --- Sieve2 (online Sieve-SGMM with full covariance weighting + averaging) ---
+    sieve2_lr: float = 0.1
+    sieve2_lr_decay: float = 0.75    # step-size exponent a in (1/2, 1)
+    sieve2_degree: int = 2           # polynomial sieve degree (1 or 2)
+    sieve2_basis: str = "poly"       # "poly" or "hermite" (basis includes intercept)
+    sieve2_B: int = 1                # moment mini-batch size per step
+    sieve2_reg: float = 1e-2         # ridge lambda_0
+    sieve2_reg_decay: float = 0.25   # lambda_t = lambda_0 / t^{reg_decay} -> 0
+    sieve2_clip: float = 10.0        # cap on per-step parameter displacement
+    sieve2_W_type: str = "full"      # "full" (Omega^{-1}), "diag", "identity"
+    sieve2_ema: float = 0.0          # >0 -> EMA rate for preconditioner; 0 -> running average
+    sieve2_proj_radius: float = 10.0 # projection radius (<=0 disables)
+    sieve2_average: bool = True      # Polyak-Ruppert averaging
 
     # --- Training ---
     n_iterations: int = 100000

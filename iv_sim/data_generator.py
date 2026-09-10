@@ -291,17 +291,20 @@ class QuadraticDataGenerator:
         from .models import QuadraticModel
         self.model = QuadraticModel()
         self.rho = getattr(config, "quadratic_rho", 0.5)
+        # Structural-noise / endogeneity knobs (defaults reproduce the README DGP).
+        self.noise_eps_y = getattr(config, "noise_eps_y", 1.0)
+        self.c_coef = getattr(config, "c_coef", 1.0)
         # Normalize the aggregate confounder:  Var(1^T c / sqrt(d_x)) = rho is
         # then independent of d_x, so the endogeneity strength does not grow
         # with the dimension (and is comparable across DGPs).
-        self.c_scale = 1.0 / np.sqrt(self.config.d_x)
+        self.c_scale = self.c_coef / np.sqrt(self.config.d_x)
 
     def generate_batch(self, n: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         d_z, d_x = self.config.d_z, self.config.d_x
         z = self.rng.normal(0, 1, size=(n, d_z))
         eps_x = self.rng.normal(0, np.sqrt(1.0 - self.rho), size=(n, d_x))
         c = self.rng.normal(0, np.sqrt(self.rho), size=(n, d_x))
-        eps_y = self.rng.normal(0, 1.0, size=(n, 1))
+        eps_y = self.rng.normal(0, self.noise_eps_y, size=(n, 1))
         x = z @ self.gamma_star + c + eps_x
         # g(theta; x) is produced by the QuadraticModel
         y = (self.model.predict(self.theta_star, x)
@@ -315,8 +318,8 @@ class QuadraticDataGenerator:
         eps_x2 = self.rng.normal(0, np.sqrt(1.0 - self.rho), size=(n, self.config.d_x))
         c1 = self.rng.normal(0, np.sqrt(self.rho), size=(n, self.config.d_x))
         c2 = self.rng.normal(0, np.sqrt(self.rho), size=(n, self.config.d_x))
-        eps_y1 = self.rng.normal(0, 1.0, size=(n, 1))
-        eps_y2 = self.rng.normal(0, 1.0, size=(n, 1))
+        eps_y1 = self.rng.normal(0, self.noise_eps_y, size=(n, 1))
+        eps_y2 = self.rng.normal(0, self.noise_eps_y, size=(n, 1))
         x1 = z @ self.gamma_star + c1 + eps_x1
         x2 = z @ self.gamma_star + c2 + eps_x2
         y1 = (self.model.predict(self.theta_star, x1)
@@ -330,7 +333,7 @@ class QuadraticDataGenerator:
             z = self.rng.normal(0, 1, size=(1, self.config.d_z))
             eps_x = self.rng.normal(0, np.sqrt(1.0 - self.rho), size=(1, self.config.d_x))
             c = self.rng.normal(0, np.sqrt(self.rho), size=(1, self.config.d_x))
-            eps_y = self.rng.normal(0, 1.0, size=(1, 1))
+            eps_y = self.rng.normal(0, self.noise_eps_y, size=(1, 1))
             x = z @ self.gamma_star + c + eps_x
             y = (self.model.predict(self.theta_star, x)
                  + self.c_scale * np.sum(c, axis=1, keepdims=True) + eps_y)
@@ -362,4 +365,56 @@ class LogisticDataGenerator(QuadraticDataGenerator):
         from .models import LogisticModel
         self.model = LogisticModel()
         self.rho = getattr(config, "logistic_rho", 0.5)
+
+
+# ---------------------------------------------------------------------------
+# ExpIV / Probit / Sine data generators
+#
+# All three reuse the Quadratic first-stage / confounder / noise structure:
+#     x = gamma*^T z + c + eps_x
+#     y = g(theta*; x) + c_coef * (1/sqrt(d_x)) 1^T c + eps_y
+# Only the structural model g(theta; x) differs, so the sampling logic is
+# inherited from QuadraticDataGenerator.
+# ---------------------------------------------------------------------------
+
+class ExponentialDataGenerator(QuadraticDataGenerator):
+    """Data generator for the ExpIV (exponential / log-link) DGP.
+
+        y = exp(theta*^T x) + c_coef * (1/sqrt(d_x)) 1^T c + eps_y
+    """
+
+    def __init__(self, config: SimulationConfig, seed: int | None = None):
+        super().__init__(config, seed=seed)
+        from .models import ExponentialModel
+        self.model = ExponentialModel()
+        self.rho = getattr(config, "expiv_rho", 0.5)
+
+
+class ProbitDataGenerator(QuadraticDataGenerator):
+    """Data generator for the Probit (probit-link) DGP.
+
+        y = Phi(theta*^T x) + c_coef * (1/sqrt(d_x)) 1^T c + eps_y
+
+    The outcome is continuous (regression form), see the model docstring.
+    """
+
+    def __init__(self, config: SimulationConfig, seed: int | None = None):
+        super().__init__(config, seed=seed)
+        from .models import ProbitModel
+        self.model = ProbitModel()
+        self.rho = getattr(config, "probit_rho", 0.5)
+
+
+class SineDataGenerator(QuadraticDataGenerator):
+    """Data generator for the Sine (periodic, non-convex) DGP.
+
+        y = theta*_0 sin(x_1 + theta*_1) + sum_{j>=2} theta*_j x_j
+            + theta*_int + c_coef * (1/sqrt(d_x)) 1^T c + eps_y
+    """
+
+    def __init__(self, config: SimulationConfig, seed: int | None = None):
+        super().__init__(config, seed=seed)
+        from .models import SineModel
+        self.model = SineModel()
+        self.rho = getattr(config, "sine_rho", 0.5)
 

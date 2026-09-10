@@ -22,6 +22,22 @@ if TYPE_CHECKING:
     from .config import SimulationConfig
 
 
+def _index_std_scale(theta: np.ndarray, gamma_star: np.ndarray,
+                     d_x: int, target_std: float) -> np.ndarray:
+    """Rescale theta so that Var(theta^T x) == target_std^2.
+
+    Under x = gamma_star^T z + c + eps_x with Var(c) + Var(eps_x) = I one has
+    Var(x) = gamma_star^T gamma_star + I.  Used by the exponential / probit
+    DGPs to keep the linear index -- and therefore exp(.) / Phi(.) -- well
+    scaled regardless of d_x and d_z.
+    """
+    Sigma_x = gamma_star.T @ gamma_star + np.eye(d_x)
+    var_idx = float(theta.ravel() @ Sigma_x @ theta.ravel())
+    if not np.isfinite(var_idx) or var_idx <= 0.0:
+        return theta
+    return theta * (target_std / np.sqrt(var_idx))
+
+
 # ============================================================================
 # Abstract base
 # ============================================================================
@@ -321,12 +337,18 @@ class QuadraticDGP(BaseDGP):
         config.d_z = getattr(cfg, "DGP_QUADRATIC_D_Z", getattr(cfg, "DGP_D_Z", 5))
         config.quadratic_rho = getattr(cfg, "DGP_QUADRATIC_RHO", 0.5)
         config.gamma_scale = getattr(cfg, "DGP_QUADRATIC_GAMMA_SCALE", 1.0)
+        config.quadratic_theta_scale = getattr(
+            cfg, "DGP_QUADRATIC_THETA_SCALE", 1.0)
+        config.noise_eps_y = getattr(cfg, "DGP_QUADRATIC_NOISE_EPS_Y", 1.0)
+        config.c_coef = getattr(cfg, "DGP_QUADRATIC_C_COEF", 1.0)
 
     def setup_model(self, config, rng):
         from .models import QuadraticModel
         config.model = QuadraticModel()
         if config.theta_star is None:
             config.theta_star = config.model.true_params(rng, config.d_x)
+            config.theta_star = config.theta_star * getattr(
+                config, "quadratic_theta_scale", 1.0)
         if config.gamma_star is None:
             config.gamma_star = rng.normal(0, 1, size=(config.d_z, config.d_x))
         config.gamma_star *= config.gamma_scale
@@ -357,12 +379,18 @@ class LogisticDGP(BaseDGP):
         config.d_z = getattr(cfg, "DGP_LOGISTIC_D_Z", getattr(cfg, "DGP_D_Z", 5))
         config.logistic_rho = getattr(cfg, "DGP_LOGISTIC_RHO", 0.5)
         config.gamma_scale = getattr(cfg, "DGP_LOGISTIC_GAMMA_SCALE", 1.0)
+        config.logistic_theta_scale = getattr(
+            cfg, "DGP_LOGISTIC_THETA_SCALE", 1.0)
+        config.noise_eps_y = getattr(cfg, "DGP_LOGISTIC_NOISE_EPS_Y", 1.0)
+        config.c_coef = getattr(cfg, "DGP_LOGISTIC_C_COEF", 1.0)
 
     def setup_model(self, config, rng):
         from .models import LogisticModel
         config.model = LogisticModel()
         if config.theta_star is None:
             config.theta_star = config.model.true_params(rng, config.d_x)
+            config.theta_star = config.theta_star * getattr(
+                config, "logistic_theta_scale", 1.0)
         if config.gamma_star is None:
             config.gamma_star = rng.normal(0, 1, size=(config.d_z, config.d_x))
         config.gamma_star *= config.gamma_scale
@@ -374,7 +402,164 @@ class LogisticDGP(BaseDGP):
 
     def summary_dgp_line(self, config):
         return (f"DGP:         Logistic, rho={config.logistic_rho}, "
-                f"gamma_scale={config.gamma_scale}")
+                f"gamma_scale={config.gamma_scale}, "
+                f"theta_scale={getattr(config, 'logistic_theta_scale', 1.0)}, "
+                f"sigma_eps_y={getattr(config, 'noise_eps_y', 1.0)}, "
+                f"c_coef={getattr(config, 'c_coef', 1.0)}")
+
+
+# ============================================================================
+# ExpIV  (exponential / log-link)
+# ============================================================================
+
+class ExpIVDGP(BaseDGP):
+    """Exponential (log-link) IV DGP.
+
+        eps_x ~ N(0, (1-rho) I_dx),  z ~ N(0, I_dz),  c ~ N(0, rho I_dx)
+        x = gamma*^T z + c + eps_x
+        y = exp(theta*^T x) + c_coef * (1/sqrt(d_x)) 1^T c + eps_y
+
+    The exponential mean is the canonical Poisson / log-link specification
+    used by log-link IV estimators (Mullahy 1997; Windmeijer & Santos Silva
+    1997).  theta* is auto-normalised so the linear index has a target
+    standard deviation (DGP_EXPIV_INDEX_SCALE, default 0.5); values >= 0.75
+    make the problem much harder and can make fixed-step SGD diverge.
+    """
+
+    dgp_mode = "expiv"
+
+    def configure(self, config, cfg):
+        config.d_x = getattr(cfg, "DGP_EXPIV_D_X", 4)
+        config.d_z = getattr(cfg, "DGP_EXPIV_D_Z", 8)
+        config.expiv_rho = getattr(cfg, "DGP_EXPIV_RHO", 0.5)
+        config.gamma_scale = getattr(cfg, "DGP_EXPIV_GAMMA_SCALE", 1.0)
+        config.expiv_index_scale = getattr(cfg, "DGP_EXPIV_INDEX_SCALE", 0.5)
+        config.noise_eps_y = getattr(cfg, "DGP_EXPIV_NOISE_EPS_Y", 1.0)
+        config.c_coef = getattr(cfg, "DGP_EXPIV_C_COEF", 1.0)
+
+    def setup_model(self, config, rng):
+        from .models import ExponentialModel
+        config.model = ExponentialModel()
+        if config.gamma_star is None:
+            config.gamma_star = rng.normal(0, 1, size=(config.d_z, config.d_x))
+            config.gamma_star *= config.gamma_scale
+        if config.theta_star is None:
+            raw = config.model.true_params(rng, config.d_x)
+            config.theta_star = _index_std_scale(
+                raw, config.gamma_star, config.d_x,
+                float(getattr(config, "expiv_index_scale", 1.0)))
+
+    def create_generator(self, config, seed=None):
+        from .data_generator import ExponentialDataGenerator
+        return ExponentialDataGenerator(config, seed=seed)
+
+    def summary_dgp_line(self, config):
+        return (f"DGP:         ExpIV (exp link), rho={config.expiv_rho}, "
+                f"gamma_scale={config.gamma_scale}, "
+                f"index_scale={getattr(config, 'expiv_index_scale', 0.5)}, "
+                f"sigma_eps_y={getattr(config, 'noise_eps_y', 1.0)}, "
+                f"c_coef={getattr(config, 'c_coef', 1.0)}")
+
+
+# ============================================================================
+# Probit  (probit link)
+# ============================================================================
+
+class ProbitDGP(BaseDGP):
+    """Probit-link IV DGP.
+
+        x = gamma*^T z + c + eps_x
+        y = Phi(theta*^T x) + c_coef * (1/sqrt(d_x)) 1^T c + eps_y
+
+    Phi is the standard normal CDF.  The outcome is kept continuous
+    (regression form) so that E[g(theta*;x) - y | z] = 0 holds and the IV
+    algorithms target theta*; a genuinely binary outcome would need
+    control-function / MLE methods outside this framework.
+    """
+
+    dgp_mode = "probit"
+
+    def configure(self, config, cfg):
+        config.d_x = getattr(cfg, "DGP_PROBIT_D_X", 4)
+        config.d_z = getattr(cfg, "DGP_PROBIT_D_Z", 8)
+        config.probit_rho = getattr(cfg, "DGP_PROBIT_RHO", 0.5)
+        config.gamma_scale = getattr(cfg, "DGP_PROBIT_GAMMA_SCALE", 1.0)
+        config.probit_index_scale = getattr(cfg, "DGP_PROBIT_INDEX_SCALE", 1.0)
+        config.noise_eps_y = getattr(cfg, "DGP_PROBIT_NOISE_EPS_Y", 1.0)
+        config.c_coef = getattr(cfg, "DGP_PROBIT_C_COEF", 1.0)
+
+    def setup_model(self, config, rng):
+        from .models import ProbitModel
+        config.model = ProbitModel()
+        if config.gamma_star is None:
+            config.gamma_star = rng.normal(0, 1, size=(config.d_z, config.d_x))
+            config.gamma_star *= config.gamma_scale
+        if config.theta_star is None:
+            raw = config.model.true_params(rng, config.d_x)
+            config.theta_star = _index_std_scale(
+                raw, config.gamma_star, config.d_x,
+                float(getattr(config, "probit_index_scale", 1.0)))
+
+    def create_generator(self, config, seed=None):
+        from .data_generator import ProbitDataGenerator
+        return ProbitDataGenerator(config, seed=seed)
+
+    def summary_dgp_line(self, config):
+        return (f"DGP:         Probit (Phi link), rho={config.probit_rho}, "
+                f"gamma_scale={config.gamma_scale}, "
+                f"index_scale={getattr(config, 'probit_index_scale', 1.0)}, "
+                f"sigma_eps_y={getattr(config, 'noise_eps_y', 1.0)}, "
+                f"c_coef={getattr(config, 'c_coef', 1.0)}")
+
+
+# ============================================================================
+# Sine  (periodic, non-convex)
+# ============================================================================
+
+class SineDGP(BaseDGP):
+    """Periodic (non-convex) IV DGP.
+
+        x = gamma*^T z + c + eps_x
+        y = theta*_0 sin(x_1 + theta*_1) + sum_{j>=2} theta*_j x_j
+            + theta*_int + c_coef * (1/sqrt(d_x)) 1^T c + eps_y
+
+    The phase enters through a sine, so the objective is non-convex and
+    multimodal -- a global-convergence stress test (the same family as
+    DeepGMM's h*(x) = sin(x)).  d_theta = d_x + 2.
+    """
+
+    dgp_mode = "sine"
+
+    def configure(self, config, cfg):
+        config.d_x = getattr(cfg, "DGP_SINE_D_X", 4)
+        config.d_z = getattr(cfg, "DGP_SINE_D_Z", 8)
+        config.sine_rho = getattr(cfg, "DGP_SINE_RHO", 0.5)
+        config.gamma_scale = getattr(cfg, "DGP_SINE_GAMMA_SCALE", 1.0)
+        config.sine_theta_scale = getattr(cfg, "DGP_SINE_THETA_SCALE", 1.0)
+        config.noise_eps_y = getattr(cfg, "DGP_SINE_NOISE_EPS_Y", 1.0)
+        config.c_coef = getattr(cfg, "DGP_SINE_C_COEF", 1.0)
+
+    def setup_model(self, config, rng):
+        from .models import SineModel
+        config.model = SineModel()
+        if config.theta_star is None:
+            config.theta_star = config.model.true_params(rng, config.d_x)
+            config.theta_star = config.theta_star * getattr(
+                config, "sine_theta_scale", 1.0)
+        if config.gamma_star is None:
+            config.gamma_star = rng.normal(0, 1, size=(config.d_z, config.d_x))
+        config.gamma_star *= config.gamma_scale
+
+    def create_generator(self, config, seed=None):
+        from .data_generator import SineDataGenerator
+        return SineDataGenerator(config, seed=seed)
+
+    def summary_dgp_line(self, config):
+        return (f"DGP:         Sine (periodic), rho={config.sine_rho}, "
+                f"gamma_scale={config.gamma_scale}, "
+                f"theta_scale={getattr(config, 'sine_theta_scale', 1.0)}, "
+                f"sigma_eps_y={getattr(config, 'noise_eps_y', 1.0)}, "
+                f"c_coef={getattr(config, 'c_coef', 1.0)}")
 
 
 # register Quadratic
@@ -382,6 +567,11 @@ _DGP_REGISTRY["quadratic"] = QuadraticDGP()
 
 # register Logistic
 _DGP_REGISTRY["logistic"] = LogisticDGP()
+
+# register ExpIV / Probit / Sine
+_DGP_REGISTRY["expiv"] = ExpIVDGP()
+_DGP_REGISTRY["probit"] = ProbitDGP()
+_DGP_REGISTRY["sine"] = SineDGP()
 
 
 def get_dgp(mode: str) -> BaseDGP:

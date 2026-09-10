@@ -29,6 +29,8 @@ COLORS = {
     "dcov3": "#DF94FF",
     "dcov4": "#7B1FA2",    # magenta / 桃红色
     "sieve": "#088122",
+    "sieve1": "#088122",
+    "sieve2": "#B5FF35",
     # SLIM default fallback
     "slim": "#2979FF",       # bright blue
     "first_order_slim": "#2979FF",
@@ -58,7 +60,9 @@ LABELS = {
     "dcov4": "DCOV4",
     "slim": "First-Order SLIM",
     "first_order_slim": "First-Order SLIM",
-    "sieve": "SieveGMM",
+    "sieve": "Sieve1",
+    "sieve1": "Sieve1",
+    "sieve2": "Sieve2",
 }
 
 FIG_SIZE = (10, 5)

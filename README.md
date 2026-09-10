@@ -130,6 +130,50 @@ y = \left[ 1 + \exp \left( -  \boldsymbol{\theta}_*^\top \boldsymbol{x} \right) 
 ```
 
 
+### ExpIV (exponential / log-link)
+
+Independently draw:
+
+```math
+\boldsymbol{\varepsilon}_x \sim N(\boldsymbol{0}_{d_x}, (1 - \rho) I_{d_x}), \quad \boldsymbol{z} \sim N(\boldsymbol{0}_{d_z}, I_{d_z}), \quad \boldsymbol{c} \sim N(\boldsymbol{0}_{d_x}, \rho I_{d_x})
+```
+
+Calculate
+
+```math
+\boldsymbol{x} = \gamma_*^\top \boldsymbol{z} + \boldsymbol{c} + \boldsymbol{\varepsilon}_x, \\
+y = \exp\left( \boldsymbol{\theta}_*^\top \boldsymbol{x} \right) + \frac{\tau}{\sqrt{d_x}} \boldsymbol{1}_{d_x}^\top \boldsymbol{c} + \sigma_\varepsilon \, \varepsilon_y.
+```
+
+The exponential mean is the canonical Poisson / log-link specification used by log-link IV and GMM estimators (Mullahy 1997; Windmeijer & Santos Silva 1997). Because $\exp$ amplifies any scale error, $\boldsymbol{\theta}_*$ is auto-normalised so that $\operatorname{Var}(\boldsymbol{\theta}_*^\top \boldsymbol{x})$ equals `DGP_EXPIV_INDEX_SCALE` (default $0.5$); larger values make the problem considerably harder and can make fixed-step SGD diverge.
+
+
+### Probit (probit / normal-CDF link)
+
+Calculate
+
+```math
+\boldsymbol{x} = \gamma_*^\top \boldsymbol{z} + \boldsymbol{c} + \boldsymbol{\varepsilon}_x, \\
+y = \Phi\!\left( \boldsymbol{\theta}_*^\top \boldsymbol{x} \right) + \frac{\tau}{\sqrt{d_x}} \boldsymbol{1}_{d_x}^\top \boldsymbol{c} + \sigma_\varepsilon \, \varepsilon_y,
+```
+
+where $` \Phi `$ is the standard normal CDF and the linear index is normalised to `DGP_PROBIT_INDEX_SCALE` (default $1.0$). This is the systematic part of the classic probit model and the natural sibling of the logistic DGP. The outcome is kept **continuous** (regression form) so that $` \mathbb{E}[g(\boldsymbol{\theta}_*;\boldsymbol{x}) - y \mid \boldsymbol{z}] = 0 `$ holds and the IV algorithms target $` \boldsymbol{\theta}_* `$; a genuinely binary outcome would require control-function / MLE methods that lie outside this framework. Since $` \Phi' = \phi `$ has much thinner tails than the logistic derivative, the gradient essentially vanishes far from $` \boldsymbol{\theta}_* `$ — a flat-objective stress test.
+
+
+### Sine (periodic, non-convex)
+
+Calculate
+
+```math
+\boldsymbol{x} = \gamma_*^\top \boldsymbol{z} + \boldsymbol{c} + \boldsymbol{\varepsilon}_x, \\
+y = \theta_{*,1} \sin\left( x_1 + \theta_{*,2} \right) + \sum_{j \ge 2} \theta_{*,j+1}\, x_j + \theta_{*,d_\theta} + \frac{\tau}{\sqrt{d_x}} \boldsymbol{1}_{d_x}^\top \boldsymbol{c} + \sigma_\varepsilon \, \varepsilon_y,
+```
+
+with $` \boldsymbol{\theta}_* = (\text{amplitude},\, \text{phase},\, \boldsymbol{b} \in \mathbb{R}^{d_x - 1},\, \text{intercept}) `$, so $` d_\theta = d_x + 2 `$. The phase enters through a sine, so the objective is **non-convex and multimodal** — the same family as DeepGMM's $` h^\star(x) = \sin(x) `$. It is a global-convergence stress test: different algorithms may settle in different local minima.
+
+In the three DGPs above $` \tau `$ is the confounder coefficient (`DGP_*_C_COEF`, controls both endogeneity strength and the noise floor) and $` \sigma_\varepsilon `$ is the exogenous noise scale (`DGP_*_NOISE_EPS_Y`).
+
+
 
 ## Algorithms
 
@@ -364,4 +408,118 @@ The parameter is updated by
 \widehat{\nabla F}(\boldsymbol\theta_{t-1}).
 ```
 
+
+### Sieve GMM (Sieve-SGMM)
+
+The CMR objective above rests on the conditional moment restriction $` \mathbb{E}(\varepsilon_y \vert \boldsymbol{z}) = 0 `$, which is equivalent to the infinite family of moment conditions $` \mathbb{E}[\psi(\boldsymbol{z})\,\varepsilon_y]=0 `$ for all suitable $` \psi `$. Sieve GMM discretises this family with a fixed, finite instrument basis $` \psi_K(\boldsymbol{z}) \in \mathbb{R}^{K} `$ (a *sieve*) and solves the resulting GMM with an online (stochastic-approximation) scheme. It consumes a single stream sample per step: no two-sample oracle and no first-stage nuisance model are required.
+
+The key device is that the current sample is used only for the moment $` m_t `$, while the Jacobian and the weighting matrix are built from **past** samples only. Hence the preconditioner $` A_{t-1} `$ is $` \mathcal{F}_{t-1} `$-measurable and
+
+```math
+\mathbb{E}\big[A_{t-1}\, m_t(\theta_{t-1}) \mid \mathcal{F}_{t-1}\big]
+=
+A_{t-1}\, m_K(\theta_{t-1}),
+```
+
+which removes the bias that a single-sample estimate of $` M(\theta)^\top W m(\theta) `$ would otherwise have.
+
+#### Sieve1 (implemented as `Sieve1` in `iv_sim/algorithms.py`)
+
+- Instrument basis (no intercept): degree 1 is $` \psi_K(\boldsymbol{z}) = (z_1,\dots,z_{d_z}) `$; degree 2 adds symmetric quadratic monomials $` z_i z_j `$ ($` i\le j `$, polynomial basis) or the orthonormal Hermite basis $` H_2(z_i),\, z_i z_j `$ for $` \boldsymbol{z}\sim N(0,I) `$.
+- Moment and Jacobian:
+
+```math
+m_t(\theta) = \psi_K(\boldsymbol{z}_t)\,\big(g_\theta(\boldsymbol{x}_t)-y_t\big),
+\qquad
+J_t(\theta) = \psi_K(\boldsymbol{z}_t)\,\nabla_\theta g_\theta(\boldsymbol{x}_t)^\top .
+```
+
+- Preconditioner from past statistics only:
+
+```math
+A_{t-1}
+=
+\big(\bar J_{t-1}^\top \hat W_{t-1} \bar J_{t-1} + \lambda I\big)^{-1}
+\bar J_{t-1}^\top \hat W_{t-1},
+```
+
+with ridge $` \lambda `$ and a diagonal inverse-variance weight $` \hat W_{t-1}=\operatorname{diag}\big(1/(\bar S_{t-1}+\lambda)\big) `$.
+
+- Parameter update (no projection, descent form):
+
+```math
+\theta_t = \theta_{t-1} - \alpha_t\, A_{t-1}\, m_t(\theta_{t-1}),
+\qquad
+\alpha_t = \alpha_0\, t^{-a},\quad a=0.5 .
+```
+
+- Running statistics (updated after the parameter step):
+
+```math
+\bar J_t = (1-\beta_t)\,\bar J_{t-1} + \beta_t\, J_t(\theta_{t-1}),
+\qquad
+\bar S_t = (1-\beta_t)\,\bar S_{t-1} + \beta_t\, \psi_K(\boldsymbol{z}_t)^2 \odot \varepsilon_t^2,
+```
+
+where $` \varepsilon_t = g_{\theta_{t-1}}(\boldsymbol{x}_t)-y_t `$, $` \odot `$ is elementwise product, and $` \beta_t = 1/t `$ (running average) or an exponential-moving-average rate if `sieve_ema > 0`.
+
+#### Sieve2 (proposed refinement)
+
+Sieve2 keeps the same "past preconditioner + current moment" skeleton but adds the standard stochastic-approximation machinery needed to make the theory hold.
+
+- Basis with intercept:
+
+```math
+\psi_K(\boldsymbol{z}) = \big(1,\ \psi_1(\boldsymbol{z}),\dots,\psi_{K-1}(\boldsymbol{z})\big)^\top .
+```
+
+- Single-sample moment (sign flipped relative to Sieve1, $` q = -m `$):
+
+```math
+q_t(\theta) = \psi_K(\boldsymbol{z}_t)\,\big[y_t - g_\theta(\boldsymbol{x}_t)\big],
+\qquad
+J_t(\theta) = \psi_K(\boldsymbol{z}_t)\,\nabla_\theta g_\theta(\boldsymbol{x}_t)^\top .
+```
+
+- Update with projection onto a compact set $` \Theta `$ and step-size exponent $` a\in(1/2,1) `$ (e.g. $` t^{-0.75} `$):
+
+```math
+\theta_t
+=
+\Pi_\Theta\!\left[\theta_{t-1} - \gamma_t\, A_{t-1}\, q_t(\theta_{t-1})\right],
+\qquad
+\gamma_t = \gamma_0\, t^{-a},\quad a\in(\tfrac12,1).
+```
+
+(Sign convention: the proposal writes $` \theta_t=\Pi_\Theta[\theta_{t-1}+\gamma_t A_{t-1}q_t] `$ with $` q_t=\psi_K(\boldsymbol{z}_t)(y_t-g_\theta(\boldsymbol{x}_t)) `$ and $` J_t=\psi_K(\boldsymbol{z}_t)\nabla_\theta g_\theta(\boldsymbol{x}_t)^\top `$. Since $` q=-m `$ and $` \bar J=\mathbb{E}[\psi_K\nabla_\theta g^\top]=\nabla_\theta m `$, this "plus" step is a descent step and coincides with Sieve1's $` \theta-\alpha A m `$ with $` m=\psi_K(g-y) `$.)
+
+- Preconditioner (as in Sieve1, but with $` \lambda_t\to 0 `$):
+
+```math
+A_{t-1}
+=
+\big(\bar J_{t-1}^\top \hat W_{t-1} \bar J_{t-1} + \lambda_t I\big)^{-1}
+\bar J_{t-1}^\top \hat W_{t-1},
+\qquad
+\bar J_t = \bar J_{t-1} + \eta_t\big(J_t(\theta_{t-1})-\bar J_{t-1}\big).
+```
+
+- Weighting: instead of a diagonal weight, estimate the full moment covariance $` \widehat\Omega \approx \mathbb{E}[q_t(\theta_0) q_t(\theta_0)^\top] `$ from a small pilot/second stage and set $` \hat W = \widehat\Omega^{-1} `$.
+- Averaging: output the Polyak–Ruppert average $` \bar\theta_T = T^{-1}\sum_{t=1}^T \theta_t `$.
+
+**Theory target (finite-dimensional smooth nonlinear IV).** For fixed $` K `$, $` \mathbb{E}[u\mid z]=0 `$, smooth $` g_\theta `$, $` m_K(\theta)=0 `$ uniquely identifying $` \theta_0 `$, full-column-rank $` M_K=\mathbb{E}[J_t(\theta_0)] `$, projected updates with $` a\in(1/2,1) `$, and $` \lambda_t\to0 `$:
+
+```math
+\theta_t \to \theta_0\ \ \text{a.s.},
+\qquad
+\sqrt{T}\big(\bar\theta_T - \theta_0\big) \Rightarrow N(0, V_K),
+\qquad
+V_K = \big(M_K^\top \Omega_K^{-1} M_K\big)^{-1},
+```
+
+i.e. first-order equivalence with the offline optimal finite-moment GMM. For genuinely nonparametric $` g `$ or large MLPs one needs $` K=K_T\to\infty `$, regularisation and stronger identification; only local identification / functional convergence can be claimed, and weak IV / non-convexity are not circumvented.
+
+#### Relationship between Sieve1 and Sieve2
+
+Both are single-stream, online Sieve-SGMM for IV sharing the identical unbiasedness mechanism (a predictable preconditioner). Sieve2 upgrades Sieve1 by (i) adding the intercept to the basis, (ii) replacing the diagonal weight with the full $` \widehat\Omega^{-1} `$, (iii) moving the step-size exponent into $` (1/2,1) `$ (e.g. $` t^{-0.75} `$) and letting $` \lambda_t\to0 `$, (iv) adding the projection $` \Pi_\Theta `$, and (v) adding Polyak–Ruppert averaging — the ingredients required for the a.s. convergence and CLT statements above.
 

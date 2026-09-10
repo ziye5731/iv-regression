@@ -171,6 +171,14 @@ class BaseIVAlgorithm:
         """
         raise NotImplementedError
 
+    def _history_theta(self, theta: np.ndarray) -> np.ndarray:
+        """Return the theta to record in the training history.
+
+        Defaults to the raw iterate; subclasses may override this to record
+        a derived estimator (e.g. a Polyak–Ruppert average).
+        """
+        return theta
+
     def train(
         self, generator: IVDataGenerator, n_iter: int, verbose: bool = False,
         verbose_every: int = 5000, history_every: int = 1,
@@ -248,7 +256,7 @@ class BaseIVAlgorithm:
             if record_now:
                 history.append({
                     "step": self.t,
-                    "theta": _theta.ravel().copy(),
+                    "theta": self._history_theta(_theta).ravel().copy(),
                     "loss": loss,
                     "lr": lr,
                 })
@@ -276,7 +284,7 @@ class BaseIVAlgorithm:
                         if not record_now:
                             history.append({
                                 "step": self.t,
-                                "theta": _theta.ravel().copy(),
+                                "theta": self._history_theta(_theta).ravel().copy(),
                                 "loss": loss,
                                 "lr": lr,
                             })
@@ -288,7 +296,7 @@ class BaseIVAlgorithm:
         if not history:
             history.append({
                 "step": self.t,
-                "theta": _theta.ravel().copy(),
+                "theta": self._history_theta(_theta).ravel().copy(),
                 "loss": float("nan"),
                 "lr": float("nan"),
             })
@@ -899,19 +907,26 @@ class DCOV4(BaseIVAlgorithm):
 
 
 # ---------------------------------------------------------------------------
-# SieveGMM  (online preconditioned GMM with a sieve of instrument functions)
+# Sieve1  (online preconditioned GMM with a sieve of instrument functions)
 # ---------------------------------------------------------------------------
 
-def _sieve_poly_features(z: np.ndarray, degree: int) -> np.ndarray:
-    """Polynomial sieve features of z up to `degree` (no intercept).
+def _sieve_poly_features(
+    z: np.ndarray, degree: int, include_intercept: bool = False
+) -> np.ndarray:
+    """Polynomial sieve features of z up to `degree`.
 
     degree = 1 -> [z_1, ..., z_dz]
     degree = 2 -> degree-1 features + [z_i z_j for i <= j]
 
+    If include_intercept is True, a constant column of ones is prepended.
+
     Returns (B, p).
     """
     d_z = z.shape[1]
-    feats = [z]
+    feats = []
+    if include_intercept:
+        feats.append(np.ones((z.shape[0], 1)))
+    feats.append(z)
     if degree >= 2:
         cols = []
         for i in range(d_z):
@@ -921,20 +936,27 @@ def _sieve_poly_features(z: np.ndarray, degree: int) -> np.ndarray:
     return np.concatenate(feats, axis=1)
 
 
-def _sieve_hermite_features(z: np.ndarray, degree: int) -> np.ndarray:
+def _sieve_hermite_features(
+    z: np.ndarray, degree: int, include_intercept: bool = False
+) -> np.ndarray:
     """Orthonormal (probabilists') Hermite sieve features of z, z ~ N(0, I).
 
-    Tensor-product basis (constant H_0 excluded) up to `degree`
-    (supports degree 1 and 2):
+    Tensor-product basis up to `degree` (supports degree 1 and 2):
 
         degree 1: H_1(z_i) = z_i
         degree 2: H_2(z_i) = (z_i^2 - 1)/sqrt(2), and
                   H_1(z_i) H_1(z_j) = z_i z_j  (i < j)
 
+    If include_intercept is True, a constant column of ones is prepended
+    (the constant H_0 = 1 is normally excluded).
+
     Returns (B, p).
     """
     d_z = z.shape[1]
-    feats = [z]
+    feats = []
+    if include_intercept:
+        feats.append(np.ones((z.shape[0], 1)))
+    feats.append(z)
     if degree >= 2:
         cols = []
         for i in range(d_z):
@@ -946,8 +968,8 @@ def _sieve_hermite_features(z: np.ndarray, degree: int) -> np.ndarray:
     return np.concatenate(feats, axis=1)
 
 
-class SieveGMM(BaseIVAlgorithm):
-    """SieveGMM: online preconditioned GMM with a sieve of instrument functions.
+class Sieve1(BaseIVAlgorithm):
+    """Sieve1: online preconditioned GMM with a sieve of instrument functions.
 
     Minimizes
 
@@ -1004,7 +1026,7 @@ class SieveGMM(BaseIVAlgorithm):
         self.ema = ema if ema is not None else getattr(config, "sieve_ema", 0.0)
 
         if self.degree not in (1, 2):
-            raise ValueError(f"SieveGMM supports degree 1 or 2, got {self.degree}")
+            raise ValueError(f"Sieve1 supports degree 1 or 2, got {self.degree}")
         if self.basis not in ("poly", "hermite"):
             raise ValueError(
                 f"Unknown sieve basis '{self.basis}' (use 'poly' or 'hermite')")
@@ -1059,7 +1081,7 @@ class SieveGMM(BaseIVAlgorithm):
     def _step(
         self, generator: IVDataGenerator, alpha: float
     ) -> tuple[np.ndarray, float]:
-        """SieveGMM single-step update (B fresh samples for the moment)."""
+        """Sieve1 single-step update (B fresh samples for the moment)."""
         B = self.B
         z, x, y = generator.generate_batch(B)
 
@@ -1084,7 +1106,7 @@ class SieveGMM(BaseIVAlgorithm):
         else:
             # Under-identified moment system (e.g. MLP): fall back to M^T W.
             if not self._warned_rank:
-                print(f"  [SieveGMM] d_theta={d} > p={p}; using gradient "
+                print(f"  [Sieve1] d_theta={d} > p={p}; using gradient "
                       f"direction (no Newton inverse).")
                 self._warned_rank = True
             scale = max(1.0, float(np.trace(MtWM)) / d)
@@ -1111,6 +1133,223 @@ class SieveGMM(BaseIVAlgorithm):
 
 
 # ---------------------------------------------------------------------------
+# Sieve2  (online Sieve-SGMM: full covariance weighting, projection, averaging)
+# ---------------------------------------------------------------------------
+
+class Sieve2(BaseIVAlgorithm):
+    """Sieve2: online Sieve-SGMM with full-moment-covariance weighting.
+
+    Refinement of Sieve1 adding the standard stochastic-approximation
+    machinery needed to make the theory hold (see README):
+
+      - instrument basis includes the intercept  psi(z) = (1, psi_1, ...)
+      - full moment-covariance weighting  W = Omega^{-1},
+        Omega = E[ q q^T ],  q = psi(z) (y - g(theta; x))
+      - step-size exponent a in (1/2, 1)  (default t^{-0.75})
+      - projection onto a compact set  Pi_Theta
+      - Polyak–Ruppert (tail) averaging of the iterates
+      - vanishing ridge  lambda_t = lambda_0 / t^{reg_decay} -> 0
+
+    Update (descent form; the '+' goes with q = psi(y - g)):
+
+        theta_t = Pi_Theta[ theta_{t-1} + gamma_t A_{t-1} q_t ],
+        A_{t-1} = (Jbar^T W Jbar + lambda_t I)^{-1} Jbar^T W,
+        Jbar    = running average of psi(z) grad g(theta; x)^T.
+
+    Since q = -m (m = psi(g - y), Sieve1's moment) and Jbar = E[psi grad g^T],
+    this is identical to Sieve1's theta - alpha A m.  A_{t-1} uses past
+    samples only, so E[A_{t-1} q_t | F_{t-1}] = A_{t-1} m_K(theta_{t-1}).
+    """
+
+    def __init__(
+        self,
+        config: SimulationConfig,
+        model: BaseModel | None = None,
+        seed: int | None = None,
+        degree: int | None = None,
+        basis: str | None = None,
+        B: int | None = None,
+        reg: float | None = None,
+        reg_decay: float | None = None,
+        clip: float | None = None,
+        W_type: str | None = None,
+        ema: float | None = None,
+        proj_radius: float | None = None,
+        average: bool | None = None,
+        init_theta: np.ndarray | None = None,
+        start_iter: int = 0,
+    ):
+        super().__init__(config, model, seed, init_theta=init_theta,
+                         start_iter=start_iter)
+        self.degree = degree if degree is not None else getattr(
+            config, "sieve2_degree", 2)
+        self.basis = basis if basis is not None else getattr(
+            config, "sieve2_basis", "poly")
+        self.B = B if B is not None else getattr(config, "sieve2_B", 1)
+        self.reg = reg if reg is not None else getattr(
+            config, "sieve2_reg", 1e-2)
+        self.reg_decay = reg_decay if reg_decay is not None else getattr(
+            config, "sieve2_reg_decay", 0.25)
+        self.clip = clip if clip is not None else getattr(
+            config, "sieve2_clip", 10.0)
+        self.w_type = W_type if W_type is not None else getattr(
+            config, "sieve2_W_type", "full")
+        self.ema = ema if ema is not None else getattr(config, "sieve2_ema", 0.0)
+        self.proj_radius = proj_radius if proj_radius is not None else getattr(
+            config, "sieve2_proj_radius", 10.0)
+        self.average = average if average is not None else getattr(
+            config, "sieve2_average", True)
+
+        if self.degree not in (1, 2):
+            raise ValueError(
+                f"Sieve2 supports degree 1 or 2, got {self.degree}")
+        if self.basis not in ("poly", "hermite"):
+            raise ValueError(
+                f"Unknown sieve basis '{self.basis}' (use 'poly' or 'hermite')")
+        if self.w_type not in ("full", "diag", "identity"):
+            raise ValueError(
+                f"Unknown sieve W_type '{self.w_type}' "
+                f"(use 'full', 'diag' or 'identity')")
+
+        self.include_intercept = True
+        self._p = self._feature_dim(config.d_z)
+        self._M_bar = np.zeros((self._p, config.d_theta))
+        self._Omega_bar = np.zeros((self._p, self._p))
+        self._warned_rank = False
+        self.theta_bar = self.theta.copy()   # Polyak–Ruppert average
+        self._avg_count = 0
+
+    # ------------------------------------------------------------------
+    # Sieve / preconditioner helpers
+    # ------------------------------------------------------------------
+
+    def _feature_dim(self, d_z: int) -> int:
+        p = d_z  # linear terms
+        if self.degree >= 2:
+            if self.basis == "hermite":
+                p += d_z + d_z * (d_z - 1) // 2   # H_2 + cross terms
+            else:
+                p += d_z * (d_z + 1) // 2         # symmetric quadratics
+        return p + 1  # intercept column
+
+    def _features(self, z: np.ndarray) -> np.ndarray:
+        if self.basis == "hermite":
+            return _sieve_hermite_features(
+                z, self.degree, include_intercept=self.include_intercept)
+        return _sieve_poly_features(
+            z, self.degree, include_intercept=self.include_intercept)
+
+    def _precond_rate(self) -> float:
+        if self.ema and self.ema > 0.0:
+            return self.ema
+        return 1.0 / max(1, self.t)
+
+    def _ridge(self) -> float:
+        """Vanishing ridge: lambda_t = lambda_0 / t^{reg_decay} -> 0."""
+        return self.reg / (self.t ** self.reg_decay)
+
+    def _weight_matrix(self) -> np.ndarray:
+        """Weighting matrix W (p, p), built from past samples only."""
+        lam = self._ridge()
+        if self.w_type == "identity":
+            return np.eye(self._p)
+        if self.w_type == "diag":
+            diag = np.diag(self._Omega_bar)
+            return np.diag(1.0 / (diag + lam))
+        # full: W = (Omega + lambda I)^{-1}
+        return np.linalg.solve(self._Omega_bar + lam * np.eye(self._p),
+                               np.eye(self._p))
+
+    def _history_theta(self, theta: np.ndarray) -> np.ndarray:
+        """Record the Polyak–Ruppert average when averaging is enabled."""
+        return self.theta_bar if self.average else theta
+
+    # ------------------------------------------------------------------
+    # BaseIVAlgorithm interface
+    # ------------------------------------------------------------------
+
+    def _get_lr0(self) -> float:
+        return getattr(self.config, "sieve2_lr", 0.1)
+
+    @property
+    def samples_per_step(self) -> int:
+        return self.B
+
+    def _get_lr_decay(self) -> float:
+        return getattr(self.config, "sieve2_lr_decay", 0.75)
+
+    def _step(
+        self, generator: IVDataGenerator, alpha: float
+    ) -> tuple[np.ndarray, float]:
+        """Sieve2 single-step update (B fresh samples for the moment)."""
+        B = self.B
+        z, x, y = generator.generate_batch(B)
+
+        psi = self._features(z)                       # (B, p)
+        pred = self.model.predict(self.theta, x)      # (B, 1)
+        eps = y - pred                                 # (B, 1)  y - g
+        grad = self.model.gradient(self.theta, x)     # (B, d_theta)
+
+        # -- current-sample moment (q_t = psi^T (y - g) / B) ---
+        q_t = (psi.T @ eps) / B                        # (p, 1)
+
+        # -- preconditioner from past samples only (predictable given F_{t-1})
+        W = self._weight_matrix()                      # (p, p)
+        WM = W @ self._M_bar                           # (p, d)
+        MtWM = self._M_bar.T @ WM                      # (d, d)
+        MtW = WM.T                                     # (d, p)
+        d, p = MtW.shape
+        lam = self._ridge()
+        if d <= p:
+            reg_eff = lam * max(1.0, float(np.trace(MtWM)) / d)
+            A = np.linalg.solve(MtWM + reg_eff * np.eye(d), MtW)   # (d, p)
+        else:
+            if not self._warned_rank:
+                print(f"  [Sieve2] d_theta={d} > p={p}; using gradient "
+                      f"direction (no Newton inverse).")
+                self._warned_rank = True
+            scale = max(1.0, float(np.trace(MtWM)) / d)
+            A = MtW / scale
+
+        update = A @ q_t                               # (d, 1)
+
+        # -- numerical safety: cap the per-step displacement
+        un = float(np.linalg.norm(update))
+        if un > self.clip:
+            update = update * (self.clip / un)
+
+        # -- descent step (see docstring for the sign with q = psi(y - g))
+        theta_new = self.theta + alpha * update
+
+        # -- projection onto the compact set {||theta|| <= proj_radius}
+        if self.proj_radius and self.proj_radius > 0:
+            nrm = float(np.linalg.norm(theta_new))
+            if nrm > self.proj_radius:
+                theta_new = theta_new * (self.proj_radius / nrm)
+
+        loss = float(np.mean(eps ** 2))
+
+        # -- update running statistics with the current sample (after theta)
+        J = (psi.T @ grad) / B                         # (p, d)  E[psi grad g^T]
+        outer = (psi * eps).T @ (psi * eps) / B        # (p, p)  E[psi psi^T eps^2]
+        beta = self._precond_rate()
+        self._M_bar = (1.0 - beta) * self._M_bar + beta * J
+        self._Omega_bar = (1.0 - beta) * self._Omega_bar + beta * outer
+
+        # -- Polyak–Ruppert averaging
+        if self.average:
+            self._avg_count += 1
+            w = 1.0 / self._avg_count
+            self.theta_bar = (1.0 - w) * self.theta_bar + w * theta_new
+
+        return theta_new, loss
+
+
+# SieveGMM is kept as an alias of Sieve1 for backwards compatibility.
+SieveGMM = Sieve1
+
+
+# ---------------------------------------------------------------------------
 # Algorithm registry
 # ---------------------------------------------------------------------------
 
@@ -1126,9 +1365,12 @@ _ALGO_REGISTRY = {
     "distance_cov": DistanceCovOpt,
     "dcov3": DCOV3,
     "dcov4": DCOV4,
-    "sieve": SieveGMM,
-    "sievegmm": SieveGMM,
-    "sieve_gmm": SieveGMM,
+    "sieve1": Sieve1,
+    "sieve": Sieve1,
+    "sievegmm": Sieve1,
+    "sieve_gmm": Sieve1,
+    "sieve2": Sieve2,
+    "sieve2_gmm": Sieve2,
 }
 
 

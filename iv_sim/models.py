@@ -28,6 +28,30 @@ def _stable_sigmoid(s: np.ndarray) -> np.ndarray:
     return out
 
 
+_SQRT_2PI = float(np.sqrt(2.0 * np.pi))
+
+
+def _norm_pdf(s: np.ndarray) -> np.ndarray:
+    """Standard normal density phi(s)."""
+    return np.exp(-0.5 * s * s) / _SQRT_2PI
+
+
+def _norm_cdf(s: np.ndarray) -> np.ndarray:
+    """Standard normal CDF Phi(s).
+
+    Uses the Abramowitz & Stegun 26.2.17 rational approximation
+    (|absolute error| < 7.5e-8), evaluated through the symmetry
+    Phi(s) = 1 - Phi(-s) so the accurate branch is always used.
+    Self-contained -- no SciPy dependency.
+    """
+    a = np.abs(s)
+    t = 1.0 / (1.0 + 0.2316419 * a)
+    poly = t * (0.319381530 + t * (-0.356563782 + t * (1.781477937
+                 + t * (-1.821255978 + t * 1.330274429))))
+    cdf_abs = 1.0 - _norm_pdf(a) * poly
+    return np.where(s >= 0.0, cdf_abs, 1.0 - cdf_abs)
+
+
 class BaseModel(ABC):
     """Abstract base class for the structural equation g(theta; x)."""
 
@@ -189,6 +213,130 @@ class LogisticModel(BaseModel):
 
     def param_dim(self, d_x: int) -> int:
         return d_x
+
+
+# Maximum magnitude of the linear index fed to exp(); exp(30) ~ 1e13.
+_EXP_INDEX_CLIP = 30.0
+
+
+class ExponentialModel(BaseModel):
+    """Exponential (log-link / Poisson-style) structural model.
+
+        g(theta; x) = exp(theta^T x)
+
+    Gradient:  dg/dtheta = exp(theta^T x) * x
+
+    The linear index is clipped to +/-30 to avoid overflow; outside the
+    clip the gradient is set to zero (the correct subgradient).
+    """
+
+    def predict(self, theta: np.ndarray, x: np.ndarray) -> np.ndarray:
+        theta_2d = np.atleast_2d(theta.reshape(-1, 1))          # (d_x, 1)
+        s = np.clip(x @ theta_2d, -_EXP_INDEX_CLIP, _EXP_INDEX_CLIP)
+        return np.exp(s)
+
+    def gradient(self, theta: np.ndarray, x: np.ndarray) -> np.ndarray:
+        theta_2d = np.atleast_2d(theta.reshape(-1, 1))          # (d_x, 1)
+        s_raw = x @ theta_2d                                     # (n, 1)
+        s = np.clip(s_raw, -_EXP_INDEX_CLIP, _EXP_INDEX_CLIP)
+        active = ((s_raw > -_EXP_INDEX_CLIP)
+                  & (s_raw < _EXP_INDEX_CLIP)).astype(float)     # (n, 1)
+        return (np.exp(s) * active) * x                          # (n, d_x)
+
+    def init_params(self, rng: np.random.Generator, d_x: int) -> np.ndarray:
+        return rng.normal(0, 0.1, size=(d_x, 1))
+
+    def true_params(self, rng: np.random.Generator, d_x: int) -> np.ndarray:
+        # Small scale keeps theta^T x = O(1) so exp() does not explode.
+        return rng.normal(0, 0.25, size=(d_x, 1))
+
+    def param_dim(self, d_x: int) -> int:
+        return d_x
+
+
+class ProbitModel(BaseModel):
+    """Probit-link structural model.
+
+        g(theta; x) = Phi(theta^T x)
+
+    Gradient:  dg/dtheta = phi(theta^T x) * x
+
+    This is the systematic part of the classic probit model.  Phi' = phi
+    has much thinner tails than the logistic derivative, so far from
+    theta* the gradient essentially vanishes -> flat-objective stress test.
+    """
+
+    def predict(self, theta: np.ndarray, x: np.ndarray) -> np.ndarray:
+        theta_2d = np.atleast_2d(theta.reshape(-1, 1))          # (d_x, 1)
+        return _norm_cdf(x @ theta_2d)
+
+    def gradient(self, theta: np.ndarray, x: np.ndarray) -> np.ndarray:
+        theta_2d = np.atleast_2d(theta.reshape(-1, 1))          # (d_x, 1)
+        s = x @ theta_2d                                         # (n, 1)
+        return _norm_pdf(s) * x                                  # (n, d_x)
+
+    def init_params(self, rng: np.random.Generator, d_x: int) -> np.ndarray:
+        return rng.normal(0, 0.1, size=(d_x, 1))
+
+    def true_params(self, rng: np.random.Generator, d_x: int) -> np.ndarray:
+        return rng.normal(0, 1.0, size=(d_x, 1))
+
+    def param_dim(self, d_x: int) -> int:
+        return d_x
+
+
+class SineModel(BaseModel):
+    """Periodic (amplitude-phase) structural model.
+
+        g(theta; x) = theta_0 * sin(x_1 + theta_1)
+                      + sum_{j>=2} theta_{j} * x_j + theta_{d-1}
+
+    Parameterisation: theta = (amplitude, phase, linear coefs for
+    x_2..x_{d_x}, intercept), so d_theta = d_x + 2.
+
+    The phase enters through sin(.), so the objective is non-convex with
+    (infinitely) many local minima -- a global-convergence stress test, the
+    same family as DeepGMM's h*(x) = sin(x).  The phase is only identified
+    modulo 2*pi, so the metric should be read as "distance to the nearest
+    equivalent optimum".
+    """
+
+    def predict(self, theta: np.ndarray, x: np.ndarray) -> np.ndarray:
+        th = np.atleast_1d(theta).ravel()
+        d_x = x.shape[1]
+        amp, phase = th[0], th[1]
+        b = th[2:2 + (d_x - 1)].reshape(-1, 1)   # (d_x-1, 1) or (0, 1)
+        lin = x[:, 1:] @ b                      # (n, 1) (zeros when d_x == 1)
+        return amp * np.sin(x[:, 0:1] + phase) + lin + th[-1]
+
+    def gradient(self, theta: np.ndarray, x: np.ndarray) -> np.ndarray:
+        th = np.atleast_1d(theta).ravel()
+        d_x = x.shape[1]
+        n = x.shape[0]
+        amp, phase = th[0], th[1]
+        s = x[:, 0:1] + phase
+        cols = [np.sin(s), amp * np.cos(s)]
+        if d_x > 1:
+            cols.append(x[:, 1:])
+        cols.append(np.ones((n, 1)))
+        return np.concatenate(cols, axis=1)      # (n, d_x + 2)
+
+    def init_params(self, rng: np.random.Generator, d_x: int) -> np.ndarray:
+        th = rng.normal(0, 0.3, size=(d_x + 2, 1))
+        th[0, 0] = rng.normal(1.0, 0.3)              # amplitude
+        th[1, 0] = rng.uniform(-np.pi, np.pi)        # phase
+        return th
+
+    def true_params(self, rng: np.random.Generator, d_x: int) -> np.ndarray:
+        th = rng.normal(0, 0.3, size=(d_x + 2, 1))
+        th[0, 0] = rng.normal(1.5, 0.3)                       # amplitude
+        th[1, 0] = rng.uniform(-np.pi / 2, np.pi / 2)         # phase
+        th[2:-1, 0] = rng.normal(1.0, 0.2, size=d_x - 1)      # linear coefs
+        th[-1, 0] = 0.0                                       # intercept
+        return th
+
+    def param_dim(self, d_x: int) -> int:
+        return d_x + 2
 
 
 class LinearFirstStage:

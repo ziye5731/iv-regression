@@ -28,7 +28,7 @@ import numpy as np
 from iv_sim.config import SimulationConfig
 from iv_sim.data_generator import create_data_generator
 from iv_sim.dgp import get_dgp
-from iv_sim.algorithms import TOSGIVaR, FirstOrderSLIM, OTSGIVaR, DistanceCovOpt, DCOV3, DCOV4, SieveGMM
+from iv_sim.algorithms import TOSGIVaR, FirstOrderSLIM, OTSGIVaR, DistanceCovOpt, DCOV3, DCOV4, Sieve1, Sieve2
 from iv_sim.metrics import aggregate_repeats
 from iv_sim.visualization import plot_comparison, plot_comparison_by_samples, print_summary_table, plot_comparison_mse_only, plot_h_star_vs_h
 
@@ -82,6 +82,18 @@ def build_simulation_config(cfg) -> SimulationConfig:
     config.sieve_clip = getattr(cfg, "ALGO_SIEVE_CLIP", 10.0)
     config.sieve_W_type = getattr(cfg, "ALGO_SIEVE_W_TYPE", "diag")
     config.sieve_ema = getattr(cfg, "ALGO_SIEVE_EMA", 0.0)
+    config.sieve2_lr = getattr(cfg, "ALGO_SIEVE2_LR", 0.1)
+    config.sieve2_lr_decay = getattr(cfg, "ALGO_SIEVE2_LR_DECAY", 0.75)
+    config.sieve2_degree = getattr(cfg, "ALGO_SIEVE2_DEGREE", 2)
+    config.sieve2_basis = getattr(cfg, "ALGO_SIEVE2_BASIS", "poly")
+    config.sieve2_B = getattr(cfg, "ALGO_SIEVE2_B", 1)
+    config.sieve2_reg = getattr(cfg, "ALGO_SIEVE2_REG", 1e-2)
+    config.sieve2_reg_decay = getattr(cfg, "ALGO_SIEVE2_REG_DECAY", 0.25)
+    config.sieve2_clip = getattr(cfg, "ALGO_SIEVE2_CLIP", 10.0)
+    config.sieve2_W_type = getattr(cfg, "ALGO_SIEVE2_W_TYPE", "full")
+    config.sieve2_ema = getattr(cfg, "ALGO_SIEVE2_EMA", 0.0)
+    config.sieve2_proj_radius = getattr(cfg, "ALGO_SIEVE2_PROJ_RADIUS", 10.0)
+    config.sieve2_average = getattr(cfg, "ALGO_SIEVE2_AVERAGE", True)
     # Re-trigger __post_init__ with corrected dimensions.
     # The first __post_init__ (from SimulationConfig()) ran with defaults;
     # reset auto-generated fields so they are regenerated with actual dims.
@@ -203,8 +215,15 @@ def run_single_experiment(
             init_theta=init_theta,
             start_iter=config.start_iteration,
         )
-    elif algo_name.lower() in ("sieve", "sievegmm", "sieve_gmm"):
-        algo = SieveGMM(
+    elif algo_name.lower() in ("sieve1", "sieve", "sievegmm", "sieve_gmm"):
+        algo = Sieve1(
+            config,
+            seed=seed + 1000,
+            init_theta=init_theta,
+            start_iter=config.start_iteration,
+        )
+    elif algo_name.lower() in ("sieve2", "sieve2_gmm"):
+        algo = Sieve2(
             config,
             seed=seed + 1000,
             init_theta=init_theta,
@@ -400,6 +419,7 @@ def main():
     run_dcov4 = "dcov4" in algo_list or "all" in algo_list
     run_slim = "slim" in algo_list or "all" in algo_list
     run_sieve = "sieve" in algo_list or "all" in algo_list
+    run_sieve2 = "sieve2" in algo_list or "all" in algo_list
 
     if run_tosg:
         algo_names.append("TOSG-IVaR")
@@ -415,7 +435,9 @@ def main():
         for sc in slim_configs:
             algo_names.append(f"SLIM(B_M={sc['B_M']}, B_m={sc['B_m']}, W={sc['W_type']})")
     if run_sieve:
-        algo_names.append("SieveGMM")
+        algo_names.append("Sieve1")
+    if run_sieve2:
+        algo_names.append("Sieve2")
     print("=" * 60)
     print("  IV Regression Simulation")
     print("=" * 60)
@@ -505,8 +527,11 @@ def main():
             _calibrate_one("DCOV4", "dcov4")
             calib_labels.append("DCOV4")
         if run_sieve:
-            _calibrate_one("SieveGMM", "sieve")
-            calib_labels.append("SieveGMM")
+            _calibrate_one("Sieve1", "sieve")
+            calib_labels.append("Sieve1")
+        if run_sieve2:
+            _calibrate_one("Sieve2", "sieve2")
+            calib_labels.append("Sieve2")
         if run_slim:
             for sc in slim_configs:
                 lbl = f"SLIM(B={sc['B_M']},m={sc['B_m']})"
@@ -564,6 +589,7 @@ def main():
     if run_dcov3: total_runs += 1
     if run_dcov4: total_runs += 1
     if run_sieve: total_runs += 1
+    if run_sieve2: total_runs += 1
     if run_slim: total_runs += len(slim_configs)
     runs_done = 0
 
@@ -580,6 +606,7 @@ def main():
     if run_dcov3:   algo_tasks.append(("dcov3", "dcov3", None))
     if run_dcov4:   algo_tasks.append(("dcov4", "dcov4", None))
     if run_sieve:   algo_tasks.append(("sieve", "sieve", None))
+    if run_sieve2:  algo_tasks.append(("sieve2", "sieve2", None))
     if run_slim:
         for sc in slim_configs:
             algo_tasks.append((sc["label"], "slim", sc))
@@ -664,6 +691,8 @@ def main():
             sp_map[algo_name] = 4
         elif algo_name == "sieve":
             sp_map[algo_name] = config.sieve_B
+        elif algo_name == "sieve2":
+            sp_map[algo_name] = config.sieve2_B
         elif algo_name.startswith("slim_"):
             parts = algo_name.split("_")
             bm_val = int(parts[1][1:]) if len(parts) > 1 else 1
