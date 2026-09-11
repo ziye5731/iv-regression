@@ -9,8 +9,8 @@ This file is copied to the results directory for reproducibility.
 # ============================================================================
 # 1. DGP  (data generating process)
 # ============================================================================
-# Modes: "tosg", "otsg", "deepgmm", "quadratic", "logistic"
-DGP_MODE = "logistic"
+# Modes: "tosg", "otsg", "deepgmm", "quadratic", "logistic", "expiv", "probit", "sine"
+DGP_MODE = "probit"
 
 # --- tosg ---
 #   z     ~ N(0, I)
@@ -77,10 +77,10 @@ DGP_LOGISTIC_C_COEF = 1.0
 DGP_EXPIV_D_X = 4
 DGP_EXPIV_D_Z = 8
 DGP_EXPIV_RHO = 0.5
-DGP_EXPIV_GAMMA_SCALE = 1.0
+DGP_EXPIV_GAMMA_SCALE = 0.1
 DGP_EXPIV_INDEX_SCALE = 0.5
-DGP_EXPIV_NOISE_EPS_Y = 1.0
-DGP_EXPIV_C_COEF = 1.0
+DGP_EXPIV_NOISE_EPS_Y = 0.1
+DGP_EXPIV_C_COEF = 0.5
 
 # --- probit (probit / normal-CDF link; y continuous, see dgp.py) ---
 #   y = Phi(theta*^T x) + (1/sqrt(d_x)) 1^T c + eps_y
@@ -88,7 +88,7 @@ DGP_EXPIV_C_COEF = 1.0
 DGP_PROBIT_D_X = 4
 DGP_PROBIT_D_Z = 8
 DGP_PROBIT_RHO = 0.5
-DGP_PROBIT_GAMMA_SCALE = 1.0
+DGP_PROBIT_GAMMA_SCALE = 0.2
 DGP_PROBIT_INDEX_SCALE = 1.0
 DGP_PROBIT_NOISE_EPS_Y = 1.0
 DGP_PROBIT_C_COEF = 1.0
@@ -96,8 +96,8 @@ DGP_PROBIT_C_COEF = 1.0
 # --- sine (periodic, non-convex) ---
 #   y = a*sin(x_1 + phi) + b^T x_2: + int + (1/sqrt(d_x)) 1^T c + eps_y
 # d_theta = d_x + 2 (amplitude, phase, linear coefs, intercept).
-DGP_SINE_D_X = 4
-DGP_SINE_D_Z = 8
+DGP_SINE_D_X = 2
+DGP_SINE_D_Z = 4
 DGP_SINE_RHO = 0.5
 DGP_SINE_GAMMA_SCALE = 1.0
 DGP_SINE_THETA_SCALE = 1.0
@@ -116,7 +116,7 @@ DGP_DEEPGMM_IV_STRENGTH = 1.0    # scales z1 coefficient (IV strength; larger â†
 # ============================================================================
 # 2. Algorithms
 # ============================================================================
-ALGO_LIST = ["sieve","tosg","otsg"]
+ALGO_LIST = ["gmmexp"]
 
 # --- TOSG ---
 ALGO_TOSG_LR = 0.01
@@ -150,7 +150,7 @@ ALGO_DCOV4_LR = 0.01
 ALGO_DCOV4_LR_DECAY = 0.5
 
 # --- Sieve1 (online Sieve-SGMM: diagonal inverse-variance weighting) ---
-ALGO_SIEVE_LR = 0.1
+ALGO_SIEVE_LR = 0.01
 ALGO_SIEVE_LR_DECAY = 0.5
 ALGO_SIEVE_DEGREE = 2          # polynomial sieve degree (1 or 2)
 ALGO_SIEVE_BASIS = "poly"      # "poly" (monomials) or "hermite" (orthonormal for N(0,I))
@@ -174,12 +174,47 @@ ALGO_SIEVE2_EMA = 0.0          # >0 -> EMA rate for preconditioner; 0 -> running
 ALGO_SIEVE2_PROJ_RADIUS = 10.0 # projection radius (<=0 disables)
 ALGO_SIEVE2_AVERAGE = True     # Polyak-Ruppert averaging
 
+# --- Sieve3 (two-batch sieve GMM with identity weighting + Polyak-Ruppert averaging) ---
+ALGO_SIEVE3_LR = 0.01          # conservative: W=I, no preconditioner (raise for well-scaled DGPs)
+ALGO_SIEVE3_LR_DECAY = 0.5     # step-size exponent a: alpha_t = lr0 * t^{-a}
+ALGO_SIEVE3_DEGREE = 2         # sieve degree (1 or 2); need p >= d_theta to identify
+ALGO_SIEVE3_BASIS = "hermite"  # "hermite" (orthonormal for N(0,I)) or "poly"
+ALGO_SIEVE3_B_M = 1            # Jacobian mini-batch size
+ALGO_SIEVE3_B_m = 1            # moment mini-batch size
+ALGO_SIEVE3_CLIP = 10.0        # cap on per-step parameter displacement
+ALGO_SIEVE3_AVERAGE = True     # Polyak-Ruppert averaging
+
+# --- GMM ablation experiments (algorithm name: "gmmexp") ---
+# The three ablation factors are ordinary hyperparameters; give any of them a
+# LIST and the runner enumerates the full cross-product (one run per
+# combination), so a single ALGO_LIST = ["gmmexp"] entry expands into many runs
+# (same pattern as ALGO_SLIM_CONFIGS).  Result labels are
+#   gmmexp_{basis}_{precond}_{weight}[_B{B_M}m{B_m}]
+#   basis   : "lin"  (= psi(z)=z, NO sieve) | "herm2" | "poly2"
+#   precond : "gd"   (plain gradient)       | "nt" (Newton-type preconditioning)
+#   weight  : "i"    (W = I)                | "d" (diag) | "f" (full Omega^-1)
+# Everything else is held fixed across the grid (B_M+B_m samples/step, past-only
+# running Mbar/Om_bar, W normalised to trace(W)=p, Polyak-Ruppert averaging), so
+# the grid isolates the sieve / preconditioning / weighting effects.
+# Reference points: lin_gd_i ~ First-Order SLIM (W=I); herm2_gd_i ~ Sieve3;
+#                   herm2_nt_d ~ Sieve1.
+ALGO_GMMEXP_BASIS = ["lin", "herm2"]
+ALGO_GMMEXP_PRECOND = ["gd", "nt"]
+ALGO_GMMEXP_WEIGHT = ["i", "d"]
+ALGO_GMMEXP_B_M = 1            # scalar or list
+ALGO_GMMEXP_B_m = 1            # scalar or list
+ALGO_GMMEXP_LR = 0.01          # None -> per-precond default (gd: 1e-3, nt: 0.1)
+ALGO_GMMEXP_LR_DECAY = 0.5
+ALGO_GMMEXP_CLIP = 10.0        # cap on per-step parameter displacement
+ALGO_GMMEXP_REG = 1e-2         # ridge for the weighting / preconditioner
+ALGO_GMMEXP_AVERAGE = True     # Polyak-Ruppert averaging (held fixed for all)
+
 # ============================================================================
 # 3. Other
 # ============================================================================
 SEED = 10
-N_ITERATIONS = int(1e8)
-N_REPEATS = 1
+N_ITERATIONS = int(1e7)
+N_REPEATS = 10
 VERBOSE_EVERY = int(1e5)
 HISTORY_EVERY = None          # record training history every N iterations
 RESUME_FROM = None
@@ -187,7 +222,7 @@ OUTDIR = None
 SAVE_PLOT = None
 X_AXIS_SCALE = "log"  # 'linear', 'log', 'symlog', 'asinh', 'logit', 'function', 'functionlog'
 
-N_JOBS = 3                         # parallel algos (> 1 uses multiprocessing)
+N_JOBS = 2                         # parallel algos (> 1 uses multiprocessing)
 EARLY_STOP_THRESHOLD = 0.0         # stop when param error change < this
 EARLY_STOP_PATIENCE = 0            # how many checks before stopping
 

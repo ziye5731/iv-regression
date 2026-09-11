@@ -1345,6 +1345,421 @@ class Sieve2(BaseIVAlgorithm):
         return theta_new, loss
 
 
+# ---------------------------------------------------------------------------
+# Sieve3  (two-batch sieve GMM with identity weighting + Polyak-Ruppert avg)
+# ---------------------------------------------------------------------------
+
+class Sieve3(BaseIVAlgorithm):
+    """Sieve3: two-batch sieve-GMM update with identity weighting.
+
+    See README.  Objective
+
+        F(theta) = E[(Y - g(theta;x)) psi_K(z)^T] W
+                   E[psi_K(z) (Y - g(theta;x))],
+
+    whose gradient is (up to constants)
+
+        grad F(theta)
+          = E[ psi_K(z1)^T W psi_K(z2) (g(theta;x2) - Y2)
+               grad_theta g(theta;x1) ].
+
+    With the orthonormal Hermite basis (and no heteroskedasticity) the optimal
+    weighting is W = I, yielding the two-batch stochastic update
+
+        theta_{t+1} = theta_t
+                      - alpha_{t+1} M~_{B_M}(theta_t)^T m~_{B_m}(theta_t),
+
+        M~_{B_M}(theta) = (1/B_M) sum_i psi_K(z_i) grad_theta g(theta;x_i)^T,
+        m~_{B_m}(theta) = (1/B_m) sum_j psi_K(z_j) (g(theta;x_j) - y_j).
+
+    The Polyak-Ruppert average of the iterates is also recorded:
+
+        theta_bar_{t+1} = (t-1)/t theta_bar_t + (1/t) theta_{t+1}.
+
+    The sieve basis psi_K(z) is a fixed set of instrument functions of z (no
+    intercept); no two-sample oracle and no first-stage nuisance model are
+    required.  Each step consumes B_M + B_m fresh samples.
+    """
+
+    def __init__(
+        self,
+        config: SimulationConfig,
+        model: BaseModel | None = None,
+        seed: int | None = None,
+        degree: int | None = None,
+        basis: str | None = None,
+        B_M: int | None = None,
+        B_m: int | None = None,
+        clip: float | None = None,
+        average: bool | None = None,
+        init_theta: np.ndarray | None = None,
+        start_iter: int = 0,
+    ):
+        """
+        Args:
+            config: simulation configuration.
+            model: structural model instance.
+            seed: independent random seed.
+            degree: sieve degree (1 or 2). Defaults to config.sieve3_degree.
+            basis: "hermite" (orthonormal for N(0,I)) or "poly".
+                Defaults to config.sieve3_basis.
+            B_M: batch size for the Jacobian estimate M~.
+                Defaults to config.sieve3_B_M.
+            B_m: batch size for the moment estimate m~.
+                Defaults to config.sieve3_B_m.
+            clip: cap on per-step parameter displacement. Defaults to
+                config.sieve3_clip.
+            average: Polyak-Ruppert averaging of the iterates.
+                Defaults to config.sieve3_average.
+            init_theta: initial theta (None = random).
+            start_iter: starting iteration count for resumed training.
+        """
+        super().__init__(config, model, seed, init_theta=init_theta,
+                         start_iter=start_iter)
+        self.degree = degree if degree is not None else getattr(
+            config, "sieve3_degree", 2)
+        self.basis = basis if basis is not None else getattr(
+            config, "sieve3_basis", "hermite")
+        self.B_M = B_M if B_M is not None else getattr(config, "sieve3_B_M", 1)
+        self.B_m = B_m if B_m is not None else getattr(config, "sieve3_B_m", 1)
+        self.clip = clip if clip is not None else getattr(
+            config, "sieve3_clip", 10.0)
+        self.average = average if average is not None else getattr(
+            config, "sieve3_average", True)
+
+        if self.degree not in (1, 2):
+            raise ValueError(
+                f"Sieve3 supports degree 1 or 2, got {self.degree}")
+        if self.basis not in ("poly", "hermite"):
+            raise ValueError(
+                f"Unknown sieve basis '{self.basis}' (use 'poly' or 'hermite')")
+        if self.B_M < 1 or self.B_m < 1:
+            raise ValueError(
+                f"Sieve3 batch sizes must be >= 1, got B_M={self.B_M}, "
+                f"B_m={self.B_m}")
+
+        self.include_intercept = False
+        self._p = self._feature_dim(config.d_z)
+        self.theta_bar = self.theta.copy()   # Polyak-Ruppert average
+        self._avg_count = 0
+
+    # ------------------------------------------------------------------
+    # Sieve helpers
+    # ------------------------------------------------------------------
+
+    def _feature_dim(self, d_z: int) -> int:
+        p = d_z  # linear terms
+        if self.degree >= 2:
+            if self.basis == "hermite":
+                p += d_z + d_z * (d_z - 1) // 2   # H_2(z_i) + cross terms
+            else:
+                p += d_z * (d_z + 1) // 2         # symmetric quadratics
+        return p
+
+    def _features(self, z: np.ndarray) -> np.ndarray:
+        if self.basis == "hermite":
+            return _sieve_hermite_features(
+                z, self.degree, include_intercept=self.include_intercept)
+        return _sieve_poly_features(
+            z, self.degree, include_intercept=self.include_intercept)
+
+    # ------------------------------------------------------------------
+    # BaseIVAlgorithm interface
+    # ------------------------------------------------------------------
+
+    def _get_lr0(self) -> float:
+        return getattr(self.config, "sieve3_lr", 0.01)
+
+    def _get_lr_decay(self) -> float:
+        return getattr(self.config, "sieve3_lr_decay", 0.5)
+
+    @property
+    def samples_per_step(self) -> int:
+        return self.B_M + self.B_m
+
+    def _history_theta(self, theta: np.ndarray) -> np.ndarray:
+        """Record the Polyak-Ruppert average when averaging is enabled."""
+        return self.theta_bar if self.average else theta
+
+    def _step(
+        self, generator: IVDataGenerator, alpha: float
+    ) -> tuple[np.ndarray, float]:
+        """Sieve3 single-step update (B_M + B_m fresh samples)."""
+        B_M, B_m = self.B_M, self.B_m
+        z_all, x_all, y_all = generator.generate_batch(B_M + B_m)
+
+        # Split into the Jacobian (M) batch and the moment (m) batch
+        z_M, x_M = z_all[:B_M], x_all[:B_M]
+        z_m, x_m, y_m = z_all[B_M:], x_all[B_M:], y_all[B_M:]
+
+        # M~_{B_M} = (1/B_M) sum_i psi(z_i) grad g(theta; x_i)^T   (p, d)
+        psi_M = self._features(z_M)
+        grad_M = self.model.gradient(self.theta, x_M)
+        M_tilde = (psi_M.T @ grad_M) / B_M
+
+        # m~_{B_m} = (1/B_m) sum_j psi(z_j) (g(theta; x_j) - y_j)   (p, 1)
+        psi_m = self._features(z_m)
+        pred_m = self.model.predict(self.theta, x_m)
+        err_m = pred_m - y_m
+        m_tilde = (psi_m.T @ err_m) / B_m
+
+        # theta - alpha * M~^T W m~  with W = I
+        update = M_tilde.T @ m_tilde                     # (d, 1)
+
+        # Numerical safety: cap the per-step parameter displacement
+        un = float(np.linalg.norm(update))
+        if un > self.clip:
+            update = update * (self.clip / un)
+
+        theta_new = self.theta - alpha * update
+        loss = float(np.mean(err_m ** 2))
+
+        # Polyak-Ruppert averaging of the iterates
+        if self.average:
+            self._avg_count += 1
+            w = 1.0 / self._avg_count
+            self.theta_bar = (1.0 - w) * self.theta_bar + w * theta_new
+
+        return theta_new, loss
+
+
+# ---------------------------------------------------------------------------
+# GMMExp  --  generic two-batch GMM estimator for ablation studies
+# ---------------------------------------------------------------------------
+
+class GMMExp(BaseIVAlgorithm):
+    """Generic two-batch online GMM estimator used for ablation studies.
+
+    This single algorithm implements a family of two-batch online GMM
+    estimators used for ablation studies.  Three factors vary, and everything
+    else is held fixed so the factors are isolated:
+
+      basis      : "lin"   -> psi(z) = z                  (no sieve)
+                   "herm2" -> orthonormal Hermite sieve, degree 2
+                   "poly2" -> polynomial sieve, degree 2
+                   ("herm1" / "poly1" are also accepted)
+      precond    : "gd"    -> direction = Mbar^T W m_t     (plain gradient)
+                   "nt"    -> direction = (Mbar^T W Mbar + lam I)^{-1}
+                                          Mbar^T W m_t    (Newton-type)
+      weight     : "i"     -> W = I
+                   "d"     -> W = diag(1 / (diag(Om_bar) + lam))
+                   "f"     -> W = (Om_bar + lam I)^{-1}
+
+    Fixed design decisions (identical for every variant):
+
+      * one step draws ``B_M + B_m`` fresh samples, split into a Jacobian batch
+        (``B_M``) and a moment batch (``B_m``), so every variant consumes the
+        same number of samples per step (see ``samples_per_step``);
+      * ``Mbar`` (p x d) and ``Om_bar`` (p x p, ``E[psi psi^T eps^2]``) are
+        running averages of *past* batches only and are updated *after* the
+        parameter step, so the update direction is ``F_{t-1}``-measurable and
+        (conditionally) unbiased;
+      * ``gd`` and ``nt`` reuse the very same ``Mbar`` and ``W``; the only
+        difference between them is the Newton matrix inverse;
+      * ``W`` is normalised to ``trace(W) = p`` (the scale of ``I``), which also
+        keeps the weighting well conditioned at initialisation;
+      * Polyak-Ruppert averaging is applied to every variant.
+
+    Any of basis / precond / weight / B_M / B_m may be set to a LIST in the
+    config (``ALGO_GMMEXP_*``); the runner then enumerates the full
+    cross-product, so a single ``ALGO_LIST = ["gmmexp"]`` entry expands into one
+    run per combination (result labels:
+    ``gmmexp_{basis}_{precond}_{weight}``).
+
+    Comparing the variants therefore isolates the effects of the sieve, the
+    preconditioning and the weighting matrix.
+    """
+
+    # --- factor defaults (overridden by kwargs / ALGO_GMMEXP_* config) ---
+    basis: str = "lin"
+    precond: str = "gd"
+    weight: str = "i"
+
+    # encoded basis -> (feature kind, sieve degree)
+    _BASIS_MAP = {
+        "lin":   ("lin", 1),
+        "herm1": ("herm", 1),
+        "herm2": ("herm", 2),
+        "poly1": ("poly", 1),
+        "poly2": ("poly", 2),
+    }
+
+    def __init__(
+        self,
+        config: SimulationConfig,
+        model: BaseModel | None = None,
+        seed: int | None = None,
+        basis: str | None = None,
+        precond: str | None = None,
+        weight: str | None = None,
+        B_M: int | None = None,
+        B_m: int | None = None,
+        clip: float | None = None,
+        reg: float | None = None,
+        average: bool | None = None,
+        init_theta: np.ndarray | None = None,
+        start_iter: int = 0,
+    ):
+        super().__init__(config, model, seed, init_theta=init_theta,
+                         start_iter=start_iter)
+        self.basis = basis if basis is not None else getattr(
+            config, "gmmexp_basis", self.basis)
+        self.precond = precond if precond is not None else getattr(
+            config, "gmmexp_precond", self.precond)
+        self.weight = weight if weight is not None else getattr(
+            config, "gmmexp_weight", self.weight)
+        if self.basis not in self._BASIS_MAP:
+            raise ValueError(f"Unknown basis '{self.basis}'; "
+                             f"valid: {sorted(self._BASIS_MAP)}")
+        self.basis_kind, self.degree = self._BASIS_MAP[self.basis]
+        self.B_M = B_M if B_M is not None else getattr(config, "gmmexp_B_M", 1)
+        self.B_m = B_m if B_m is not None else getattr(config, "gmmexp_B_m", 1)
+        self.clip = clip if clip is not None else getattr(
+            config, "gmmexp_clip", 10.0)
+        self.reg = reg if reg is not None else getattr(
+            config, "gmmexp_reg", 1e-2)
+        self.average = (average if average is not None
+                        else getattr(config, "gmmexp_average", True))
+
+        if self.precond not in ("gd", "nt"):
+            raise ValueError(f"Unknown precond '{self.precond}'")
+        if self.weight not in ("i", "d", "f"):
+            raise ValueError(f"Unknown weight '{self.weight}'")
+        if self.B_M < 1 or self.B_m < 1:
+            raise ValueError("GMMExp batch sizes must be >= 1")
+
+        self._p = self._feature_dim(config.d_z)
+        self._M_bar = np.zeros((self._p, config.d_theta))
+        self._Om_bar = np.zeros((self._p, self._p))
+        self.theta_bar = self.theta.copy()   # Polyak-Ruppert average
+        self._avg_count = 0
+        self._warned_rank = False
+
+    # ------------------------------------------------------------------
+    # Sieve / weighting helpers
+    # ------------------------------------------------------------------
+
+    def _feature_dim(self, d_z: int) -> int:
+        if self.basis_kind == "lin" or self.degree == 1:
+            return d_z
+        if self.basis_kind == "herm":
+            return d_z + d_z + d_z * (d_z - 1) // 2   # H_1 + H_2 + cross
+        return d_z + d_z * (d_z + 1) // 2             # linear + quadratics
+
+    def _features(self, z: np.ndarray) -> np.ndarray:
+        if self.basis_kind == "lin" or self.degree == 1:
+            return z                                  # no sieve: psi(z) = z
+        if self.basis_kind == "herm":
+            return _sieve_hermite_features(z, self.degree,
+                                           include_intercept=False)
+        return _sieve_poly_features(z, self.degree, include_intercept=False)
+
+    def _weight_matrix(self) -> np.ndarray:
+        """W built from PAST running statistics only (measurable w.r.t. F_{t-1})."""
+        if self.weight == "i":
+            return np.eye(self._p)
+        lam = self.reg
+        if self.weight == "d":
+            W = np.diag(1.0 / (np.diag(self._Om_bar) + lam))
+        else:
+            W = np.linalg.solve(self._Om_bar + lam * np.eye(self._p),
+                                np.eye(self._p))
+        tr = float(np.trace(W))
+        if tr > 0:
+            W = W * (self._p / tr)   # normalise: trace(W) = p (scale of I)
+        return W
+
+    def _tag(self) -> str:
+        return f"gmmexp {self.basis}/{self.precond}/{self.weight}"
+
+    # ------------------------------------------------------------------
+    # BaseIVAlgorithm interface
+    # ------------------------------------------------------------------
+
+    def _get_lr0(self) -> float:
+        override = getattr(self.config, "gmmexp_lr", None)
+        if override is not None:
+            return float(override)
+        # Newton-type steps are well scaled (like Sieve1); plain gradient steps
+        # need a conservative step (like Sieve3).
+        return 1e-3 if self.precond == "gd" else 0.1
+
+    def _get_lr_decay(self) -> float:
+        override = getattr(self.config, "gmmexp_lr_decay", None)
+        return float(override) if override is not None else 0.5
+
+    @property
+    def samples_per_step(self) -> int:
+        return self.B_M + self.B_m
+
+    def _history_theta(self, theta: np.ndarray) -> np.ndarray:
+        """Record the Polyak-Ruppert average when averaging is enabled."""
+        return self.theta_bar if self.average else theta
+
+    def _step(
+        self, generator: IVDataGenerator, alpha: float
+    ) -> tuple[np.ndarray, float]:
+        """GMMExp single-step update (B_M + B_m fresh samples)."""
+        B_M, B_m = self.B_M, self.B_m
+        z_all, x_all, y_all = generator.generate_batch(B_M + B_m)
+        z_M, x_M = z_all[:B_M], x_all[:B_M]
+        z_m, x_m, y_m = z_all[B_M:], x_all[B_M:], y_all[B_M:]
+
+        # Jacobian batch (used only to keep the running Mbar up to date)
+        psi_M = self._features(z_M)
+        grad_M = self.model.gradient(self.theta, x_M)
+        J_batch = (psi_M.T @ grad_M) / B_M                # (p, d)
+
+        # Moment batch
+        psi_m = self._features(z_m)
+        err_m = self.model.predict(self.theta, x_m) - y_m  # (B_m, 1)
+        m_t = (psi_m.T @ err_m) / B_m                      # (p, 1)
+
+        # Direction: identical Mbar and W for "gd" and "nt"; the only
+        # difference is whether the Newton matrix inverse is applied.
+        W = self._weight_matrix()                          # (p, p)
+        MtW = self._M_bar.T @ W                            # (d, p)
+
+        if self.precond == "nt":
+            MtWM = MtW @ self._M_bar                       # (d, d)
+            d, p = MtWM.shape
+            if d <= p:
+                reg_eff = self.reg * max(1.0, float(np.trace(MtWM)) / d)
+                A = np.linalg.solve(MtWM + reg_eff * np.eye(d), MtW)
+                direction = A @ m_t                        # (d, 1)
+            else:
+                if not self._warned_rank:
+                    print(f"  [{self._tag()}] d_theta={d} > p={p}; using "
+                          f"gradient direction (no Newton inverse).")
+                    self._warned_rank = True
+                scale = max(1.0, float(np.trace(MtWM)) / d)
+                direction = (MtW @ m_t) / scale
+        else:
+            direction = MtW @ m_t                          # (d, 1)
+
+        # Numerical safety: cap the per-step parameter displacement
+        un = float(np.linalg.norm(direction))
+        if un > self.clip:
+            direction = direction * (self.clip / un)
+
+        theta_new = self.theta - alpha * direction
+        loss = float(np.mean(err_m ** 2))
+
+        # Running statistics from past batches only (update AFTER the step)
+        beta = 1.0 / max(1, self.t)
+        self._M_bar = (1.0 - beta) * self._M_bar + beta * J_batch
+        outer = (psi_m * err_m).T @ (psi_m * err_m) / B_m   # E[psi psi^T eps^2]
+        self._Om_bar = (1.0 - beta) * self._Om_bar + beta * outer
+
+        # Polyak-Ruppert averaging of the iterates
+        if self.average:
+            self._avg_count += 1
+            w = 1.0 / self._avg_count
+            self.theta_bar = (1.0 - w) * self.theta_bar + w * theta_new
+
+        return theta_new, loss
+
+
 # SieveGMM is kept as an alias of Sieve1 for backwards compatibility.
 SieveGMM = Sieve1
 
@@ -1371,6 +1786,9 @@ _ALGO_REGISTRY = {
     "sieve_gmm": Sieve1,
     "sieve2": Sieve2,
     "sieve2_gmm": Sieve2,
+    "sieve3": Sieve3,
+    "sieve3_gmm": Sieve3,
+    "gmmexp": GMMExp,
 }
 
 

@@ -7,7 +7,8 @@ Plots include:
 
 1. Parameter error convergence curves (with std shading)
 2. Prediction MSE convergence curves (with std shading)
-3. Multi-algorithm comparison plots
+3. Training loss / objective convergence curves (with std shading)
+4. Multi-algorithm comparison plots
 """
 
 import matplotlib.pyplot as plt
@@ -31,6 +32,7 @@ COLORS = {
     "sieve": "#088122",
     "sieve1": "#088122",
     "sieve2": "#B5FF35",
+    "sieve3": "#00B0FF",     # light blue
     # SLIM default fallback
     "slim": "#2979FF",       # bright blue
     "first_order_slim": "#2979FF",
@@ -63,7 +65,12 @@ LABELS = {
     "sieve": "Sieve1",
     "sieve1": "Sieve1",
     "sieve2": "Sieve2",
+    "sieve3": "Sieve3",
 }
+
+# Ablation palette for the gmmexp cross-product runs
+_GMMEXP_PALETTE = [plt.get_cmap("tab20")(i / 20.0) for i in range(18)]
+_gmmexp_variant_counter: dict[str, int] = {}
 
 FIG_SIZE = (10, 5)
 DPI = 120
@@ -97,6 +104,14 @@ def _get_color_and_label(algo_name: str) -> tuple[str, str]:
                 formatted.append(p)
         label = "SLIM(" + ", ".join(formatted) + ")"
         return color, label
+    # gmmexp_{basis}_{precond}_{weight}[_B{BM}m{Bm}] ablation runs
+    if key.startswith("gmmexp"):
+        if key not in _gmmexp_variant_counter:
+            _gmmexp_variant_counter[key] = len(_gmmexp_variant_counter)
+        idx = _gmmexp_variant_counter[key]
+        suffix = key[len("gmmexp"):].strip("_")
+        label = f"GMMEXP({suffix.replace('_', ',')})" if suffix else "GMMEXP"
+        return _GMMEXP_PALETTE[idx % len(_GMMEXP_PALETTE)], label
     return "#333333", algo_name
 
 
@@ -190,7 +205,7 @@ def plot_convergence(
 
 def plot_comparison(
     all_results: dict[str, dict[str, np.ndarray]],
-    figsize: tuple = (12, 5),
+    figsize: tuple = (18, 5),
     dpi: int = DPI,
     save_path: str | None = None,
     use_quantile: bool = True,
@@ -208,7 +223,7 @@ def plot_comparison(
         x_scale: "log" or "linear" for x-axis scale.
         title: subtitle for the figure.
     """
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize, dpi=dpi)
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=figsize, dpi=dpi)
 
     for algo_name, results in all_results.items():
         color, label = _get_color_and_label(algo_name)
@@ -246,6 +261,23 @@ def plot_comparison(
             color=color, alpha=0.1,
         )
 
+        # Training loss / objective (algorithm-specific; skip if unavailable)
+        if "loss_mean" in results or "loss_median" in results:
+            if use_quantile and "loss_q25" in results:
+                lo3, hi3 = results["loss_q25"], results["loss_q75"]
+            else:
+                lo3 = results["loss_mean"] - results["loss_std"]
+                hi3 = results["loss_mean"] + results["loss_std"]
+            line3 = results.get("loss_median", results["loss_mean"])
+            ax3.plot(
+                results["steps"], line3,
+                color=color, linewidth=1.5, label=label,
+            )
+            ax3.fill_between(
+                results["steps"], lo3, hi3,
+                color=color, alpha=0.1,
+            )
+
     ax1.set_xlabel("Iteration")
     ax1.set_ylabel(r"Parameter error $\|\hat{\theta} - \theta^*\|_2$")
     ax1.set_title(f"Parameter error ({title})")
@@ -261,6 +293,15 @@ def plot_comparison(
     ax2.set_xscale(x_scale)
     ax2.legend()
     ax2.grid(True, alpha=0.3)
+
+    ax3.set_xlabel("Iteration")
+    ax3.set_ylabel("Loss")
+    ax3.set_title(f"Loss ({title})")
+    # symlog (not log) so non-positive objectives such as DCOV stay visible
+    ax3.set_yscale("symlog", linthresh=1e-3)
+    ax3.set_xscale(x_scale)
+    ax3.legend()
+    ax3.grid(True, alpha=0.3)
 
     plt.tight_layout()
 
@@ -279,7 +320,7 @@ def plot_comparison(
 def plot_comparison_by_samples(
     all_results: dict[str, dict[str, np.ndarray]],
     samples_per_step: dict[str, int],
-    figsize: tuple = (12, 5),
+    figsize: tuple = (18, 5),
     dpi: int = DPI,
     save_path: str | None = None,
     use_quantile: bool = True,
@@ -318,7 +359,7 @@ def plot_comparison_by_samples(
     # Works both for dense histories and for log-spaced checkpoints.
     common_grid = steps_common.astype(float) * min_sp
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize, dpi=dpi)
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=figsize, dpi=dpi)
 
     for algo_name, results in all_results.items():
         color, label = _get_color_and_label(algo_name)
@@ -347,12 +388,24 @@ def plot_comparison_by_samples(
         line1_raw = results.get("param_error_median", results["param_error_mean"])[keep]
         line2_raw = results.get("pred_mse_median", results["pred_mse_mean"])[keep]
 
+        # Loss (algorithm-specific; skip if unavailable)
+        has_loss = "loss_mean" in results or "loss_median" in results
+        if has_loss:
+            if use_quantile and "loss_q25" in results:
+                lo3_raw = results["loss_q25"][keep]
+                hi3_raw = results["loss_q75"][keep]
+            else:
+                lo3_raw = (results["loss_mean"] - results["loss_std"])[keep]
+                hi3_raw = (results["loss_mean"] + results["loss_std"])[keep]
+            line3_raw = results.get("loss_median", results["loss_mean"])[keep]
+
         # Interpolate to common grid
         if sp == min_sp:
-            line1 = line1_raw
-            line2 = line2_raw
+            line1, line2 = line1_raw, line2_raw
             lo1, hi1 = lo1_raw, hi1_raw
             lo2, hi2 = lo2_raw, hi2_raw
+            if has_loss:
+                line3, lo3, hi3 = line3_raw, lo3_raw, hi3_raw
             x_vals = sample_counts
         else:
             line1 = np.interp(common_grid, sample_counts, line1_raw)
@@ -361,6 +414,10 @@ def plot_comparison_by_samples(
             hi1 = np.interp(common_grid, sample_counts, hi1_raw)
             lo2 = np.interp(common_grid, sample_counts, lo2_raw)
             hi2 = np.interp(common_grid, sample_counts, hi2_raw)
+            if has_loss:
+                line3 = np.interp(common_grid, sample_counts, line3_raw)
+                lo3 = np.interp(common_grid, sample_counts, lo3_raw)
+                hi3 = np.interp(common_grid, sample_counts, hi3_raw)
             x_vals = common_grid
 
         ax1.plot(x_vals, line1, color=color, linewidth=1.5, label=label)
@@ -368,6 +425,10 @@ def plot_comparison_by_samples(
 
         ax2.plot(x_vals, line2, color=color, linewidth=1.5, label=label)
         ax2.fill_between(x_vals, lo2, hi2, color=color, alpha=0.1)
+
+        if has_loss:
+            ax3.plot(x_vals, line3, color=color, linewidth=1.5, label=label)
+            ax3.fill_between(x_vals, lo3, hi3, color=color, alpha=0.1)
 
     ax1.set_xlabel("Samples seen")
     ax1.set_ylabel(r"Parameter error $\|\hat{\theta} - \theta^*\|_2$")
@@ -384,6 +445,15 @@ def plot_comparison_by_samples(
     ax2.set_xscale(x_scale)
     ax2.legend()
     ax2.grid(True, alpha=0.3)
+
+    ax3.set_xlabel("Samples seen")
+    ax3.set_ylabel("Loss")
+    ax3.set_title("Loss (same samples)")
+    # symlog (not log) so non-positive objectives such as DCOV stay visible
+    ax3.set_yscale("symlog", linthresh=1e-3)
+    ax3.set_xscale(x_scale)
+    ax3.legend()
+    ax3.grid(True, alpha=0.3)
 
     plt.tight_layout()
 

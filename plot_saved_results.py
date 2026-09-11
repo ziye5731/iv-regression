@@ -108,6 +108,13 @@ def main() -> None:
         out_file=out_dir / f"{results_path.stem}_pred_mse.png",
         title="Prediction MSE vs Steps",
     )
+    if any("loss_mean" in values for values in algos.values()):
+        plot_metric(
+            algos,
+            metric="loss",
+            out_file=out_dir / f"{results_path.stem}_loss.png",
+            title="Loss vs Steps",
+        )
 
     if args.show:
         plt.show()

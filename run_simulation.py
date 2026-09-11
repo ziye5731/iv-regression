@@ -16,6 +16,7 @@ Usage:
 
 import contextlib
 import importlib.util
+import itertools
 import os
 import shutil
 import sys
@@ -28,7 +29,7 @@ import numpy as np
 from iv_sim.config import SimulationConfig
 from iv_sim.data_generator import create_data_generator
 from iv_sim.dgp import get_dgp
-from iv_sim.algorithms import TOSGIVaR, FirstOrderSLIM, OTSGIVaR, DistanceCovOpt, DCOV3, DCOV4, Sieve1, Sieve2
+from iv_sim.algorithms import TOSGIVaR, FirstOrderSLIM, OTSGIVaR, DistanceCovOpt, DCOV3, DCOV4, Sieve1, Sieve2, Sieve3, GMMExp, get_algorithm
 from iv_sim.metrics import aggregate_repeats
 from iv_sim.visualization import plot_comparison, plot_comparison_by_samples, print_summary_table, plot_comparison_mse_only, plot_h_star_vs_h
 
@@ -94,6 +95,25 @@ def build_simulation_config(cfg) -> SimulationConfig:
     config.sieve2_ema = getattr(cfg, "ALGO_SIEVE2_EMA", 0.0)
     config.sieve2_proj_radius = getattr(cfg, "ALGO_SIEVE2_PROJ_RADIUS", 10.0)
     config.sieve2_average = getattr(cfg, "ALGO_SIEVE2_AVERAGE", True)
+    config.sieve3_lr = getattr(cfg, "ALGO_SIEVE3_LR", 1e-3)
+    config.sieve3_lr_decay = getattr(cfg, "ALGO_SIEVE3_LR_DECAY", 0.5)
+    config.sieve3_degree = getattr(cfg, "ALGO_SIEVE3_DEGREE", 2)
+    config.sieve3_basis = getattr(cfg, "ALGO_SIEVE3_BASIS", "hermite")
+    config.sieve3_B_M = getattr(cfg, "ALGO_SIEVE3_B_M", 1)
+    config.sieve3_B_m = getattr(cfg, "ALGO_SIEVE3_B_m", 1)
+    config.sieve3_clip = getattr(cfg, "ALGO_SIEVE3_CLIP", 10.0)
+    config.sieve3_average = getattr(cfg, "ALGO_SIEVE3_AVERAGE", True)
+    config.gmmexp_basis = _scalar(getattr(cfg, "ALGO_GMMEXP_BASIS", "lin"), "lin")
+    config.gmmexp_precond = _scalar(getattr(cfg, "ALGO_GMMEXP_PRECOND", "gd"), "gd")
+    config.gmmexp_weight = _scalar(getattr(cfg, "ALGO_GMMEXP_WEIGHT", "i"), "i")
+    config.gmmexp_lr = _scalar(getattr(cfg, "ALGO_GMMEXP_LR", None), None)
+    config.gmmexp_lr_decay = _scalar(
+        getattr(cfg, "ALGO_GMMEXP_LR_DECAY", 0.5), 0.5)
+    config.gmmexp_B_M = _scalar(getattr(cfg, "ALGO_GMMEXP_B_M", 1), 1)
+    config.gmmexp_B_m = _scalar(getattr(cfg, "ALGO_GMMEXP_B_m", 1), 1)
+    config.gmmexp_clip = getattr(cfg, "ALGO_GMMEXP_CLIP", 10.0)
+    config.gmmexp_reg = getattr(cfg, "ALGO_GMMEXP_REG", 1e-2)
+    config.gmmexp_average = getattr(cfg, "ALGO_GMMEXP_AVERAGE", True)
     # Re-trigger __post_init__ with corrected dimensions.
     # The first __post_init__ (from SimulationConfig()) ran with defaults;
     # reset auto-generated fields so they are regenerated with actual dims.
@@ -156,6 +176,38 @@ def _parse_slim_configs(cfg) -> list[dict]:
         label = f"slim_B{B_M}_m{B_m}_{W_type[:2]}"
         configs.append({"B_M": B_M, "B_m": B_m, "W_type": W_type, "label": label})
     return configs
+
+
+def _scalar(value, default):
+    """Return `value`, or `default` when it is a list (a grid axis)."""
+    return default if isinstance(value, (list, tuple)) else value
+
+
+def _parse_gmmexp_configs(cfg) -> list[dict]:
+    """Expand the ALGO_GMMEXP_* hyperparameters into one dict per combination.
+
+    Any of basis / precond / weight / B_M / B_m may be given as a list; the
+    full cross-product is enumerated, so a single ALGO_LIST = ["gmmexp"] entry
+    expands into many runs (the same idea as ALGO_SLIM_CONFIGS).  Each returned
+    dict also carries "label" (result key / legend) and "sp" (samples/step).
+    """
+    grid = {
+        "basis":   getattr(cfg, "ALGO_GMMEXP_BASIS", "lin"),
+        "precond": getattr(cfg, "ALGO_GMMEXP_PRECOND", "gd"),
+        "weight":  getattr(cfg, "ALGO_GMMEXP_WEIGHT", "i"),
+        "B_M":     getattr(cfg, "ALGO_GMMEXP_B_M", 1),
+        "B_m":     getattr(cfg, "ALGO_GMMEXP_B_m", 1),
+    }
+    axes = [v if isinstance(v, (list, tuple)) else [v] for v in grid.values()]
+    combos = [dict(zip(grid, values)) for values in itertools.product(*axes)]
+    vary_batch = len({(c["B_M"], c["B_m"]) for c in combos}) > 1
+    for c in combos:
+        label = f"gmmexp_{c['basis']}_{c['precond']}_{c['weight']}"
+        if vary_batch:
+            label += f"_B{c['B_M']}m{c['B_m']}"
+        c["label"] = label
+        c["sp"] = int(c["B_M"]) + int(c["B_m"])
+    return combos
 
 
 def run_single_experiment(
@@ -229,8 +281,33 @@ def run_single_experiment(
             init_theta=init_theta,
             start_iter=config.start_iteration,
         )
+    elif algo_name.lower() in ("sieve3", "sieve3_gmm"):
+        algo = Sieve3(
+            config,
+            seed=seed + 1000,
+            init_theta=init_theta,
+            start_iter=config.start_iteration,
+        )
+    elif algo_name.lower() in ("gmmexp", "gmm_exp"):
+        algo = GMMExp(
+            config,
+            seed=seed + 1000,
+            init_theta=init_theta,
+            start_iter=config.start_iteration,
+            **(slim_kwargs or {}),
+        )
     else:
-        raise ValueError(f"Unknown algorithm: {algo_name}")
+        # Any other registered algorithm.
+        try:
+            algo_cls = get_algorithm(algo_name)
+        except ValueError as exc:
+            raise ValueError(f"Unknown algorithm: {algo_name}") from exc
+        algo = algo_cls(
+            config,
+            seed=seed + 1000,
+            init_theta=init_theta,
+            start_iter=config.start_iteration,
+        )
     # Same iterations for all algorithms
     n_iter = config.n_iterations
     ve = config.verbose_every
@@ -364,6 +441,7 @@ def main():
     cfg = _load_config_module(config_path)
     config = build_simulation_config(cfg)
     slim_configs = _parse_slim_configs(cfg)
+    gmmexp_configs = _parse_gmmexp_configs(cfg)
 
     # --- Resume logic ---
     resume_from = getattr(cfg, "RESUME_FROM", None)
@@ -420,6 +498,30 @@ def main():
     run_slim = "slim" in algo_list or "all" in algo_list
     run_sieve = "sieve" in algo_list or "all" in algo_list
     run_sieve2 = "sieve2" in algo_list or "all" in algo_list
+    run_sieve3 = "sieve3" in algo_list or "all" in algo_list
+    run_gmmexp = "gmmexp" in algo_list or "all" in algo_list
+
+    # --- generic registered algorithms referenced directly in ALGO_LIST ----
+    # (any get_algorithm()-registered name not handled above).  These are
+    # opt-in only and are deliberately NOT triggered by "all".
+    _special = {
+        "all", "tosg", "tosg_ivar", "otsg", "otsg_ivar",
+        "dcov", "dco", "distance_cov", "dcov3", "dcov4",
+        "slim", "first_order_slim",
+        "sieve", "sieve1", "sievegmm", "sieve_gmm",
+        "sieve2", "sieve2_gmm", "sieve3", "sieve3_gmm", "gmmexp",
+    }
+    extra_algos = []
+    for _nm in algo_list:
+        if _nm in _special:
+            continue
+        try:
+            get_algorithm(_nm)
+        except ValueError:
+            print(f"  WARNING: unknown algorithm in ALGO_LIST: {_nm!r}",
+                  file=sys.stderr)
+            continue
+        extra_algos.append(_nm)
 
     if run_tosg:
         algo_names.append("TOSG-IVaR")
@@ -438,6 +540,12 @@ def main():
         algo_names.append("Sieve1")
     if run_sieve2:
         algo_names.append("Sieve2")
+    if run_sieve3:
+        algo_names.append("Sieve3")
+    if run_gmmexp:
+        for gc in gmmexp_configs:
+            algo_names.append(gc["label"])
+    algo_names.extend(extra_algos)
     print("=" * 60)
     print("  IV Regression Simulation")
     print("=" * 60)
@@ -532,6 +640,17 @@ def main():
         if run_sieve2:
             _calibrate_one("Sieve2", "sieve2")
             calib_labels.append("Sieve2")
+        if run_sieve3:
+            _calibrate_one("Sieve3", "sieve3")
+            calib_labels.append("Sieve3")
+        if run_gmmexp:
+            for gc in gmmexp_configs:
+                kw = {k: v for k, v in gc.items() if k not in ("label", "sp")}
+                _calibrate_one(gc["label"], "gmmexp", kw)
+                calib_labels.append(gc["label"])
+        for _nm in extra_algos:
+            _calibrate_one(_nm, _nm)
+            calib_labels.append(_nm)
         if run_slim:
             for sc in slim_configs:
                 lbl = f"SLIM(B={sc['B_M']},m={sc['B_m']})"
@@ -590,6 +709,9 @@ def main():
     if run_dcov4: total_runs += 1
     if run_sieve: total_runs += 1
     if run_sieve2: total_runs += 1
+    if run_sieve3: total_runs += 1
+    if run_gmmexp: total_runs += len(gmmexp_configs)
+    total_runs += len(extra_algos)
     if run_slim: total_runs += len(slim_configs)
     runs_done = 0
 
@@ -607,6 +729,12 @@ def main():
     if run_dcov4:   algo_tasks.append(("dcov4", "dcov4", None))
     if run_sieve:   algo_tasks.append(("sieve", "sieve", None))
     if run_sieve2:  algo_tasks.append(("sieve2", "sieve2", None))
+    if run_sieve3:  algo_tasks.append(("sieve3", "sieve3", None))
+    if run_gmmexp:
+        for gc in gmmexp_configs:
+            algo_tasks.append((gc["label"], "gmmexp", gc))
+    for _nm in extra_algos:
+        algo_tasks.append((_nm, _nm, None))
     if run_slim:
         for sc in slim_configs:
             algo_tasks.append((sc["label"], "slim", sc))
@@ -623,8 +751,8 @@ def main():
         with ProcessPoolExecutor(max_workers=n_jobs) as executor:
             fut_map = {}
             for label, algo_name, sc in algo_tasks:
-                sk = {"B_M": sc["B_M"], "B_m": sc["B_m"],
-                       "W_type": sc["W_type"]} if sc else None
+                sk = ({k: v for k, v in sc.items() if k not in ("label", "sp")}
+                      if sc else None)
                 init_ths = _get_init_thetas(label)
                 log_file = os.path.join(log_dir, f"{label}.log")
                 fut = executor.submit(
@@ -654,8 +782,8 @@ def main():
         # Sequential execution (original path)
         for label, algo_name, sc in algo_tasks:
             print(f"\n[*] Running {label.upper()}...")
-            sk = {"B_M": sc["B_M"], "B_m": sc["B_m"],
-                   "W_type": sc["W_type"]} if sc else None
+            sk = ({k: v for k, v in sc.items() if k not in ("label", "sp")}
+                  if sc else None)
             all_results[label], all_thetas[label] = run_repeated_experiment(
                 config, algo_name, config.n_repeats,
                 slim_kwargs=sk,
@@ -677,6 +805,7 @@ def main():
     x_scale = getattr(cfg, "X_AXIS_SCALE", "log")
 
     # Build samples_per_step map for same-samples plot
+    gmmexp_sp = {gc["label"]: gc["sp"] for gc in gmmexp_configs}
     sp_map = {}
     for algo_name, results in all_results.items():
         if algo_name == "tosg":
@@ -693,13 +822,22 @@ def main():
             sp_map[algo_name] = config.sieve_B
         elif algo_name == "sieve2":
             sp_map[algo_name] = config.sieve2_B
+        elif algo_name == "sieve3":
+            sp_map[algo_name] = config.sieve3_B_M + config.sieve3_B_m
         elif algo_name.startswith("slim_"):
             parts = algo_name.split("_")
             bm_val = int(parts[1][1:]) if len(parts) > 1 else 1
             bm2_val = int(parts[2][1:]) if len(parts) > 2 else 1
             sp_map[algo_name] = bm_val + bm2_val
+        elif algo_name in gmmexp_sp:
+            sp_map[algo_name] = gmmexp_sp[algo_name]
         else:
-            sp_map[algo_name] = 1
+            # generic: ask the registered algorithm for its samples-per-step
+            try:
+                sp_map[algo_name] = get_algorithm(algo_name)(
+                    config).samples_per_step
+            except Exception:
+                sp_map[algo_name] = 1
 
     os.makedirs(outdir, exist_ok=True)
 

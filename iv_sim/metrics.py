@@ -92,6 +92,7 @@ def evaluate_history(
             'steps': step numbers (M,),
             'param_error': L2 parameter errors (M,),
             'pred_mse': prediction MSEs (M,),
+            'loss': training loss / objective values (M,),
         }
     """
     theta_star = config.theta_star
@@ -99,6 +100,7 @@ def evaluate_history(
     steps = []
     param_errors = []
     pred_mses = []
+    losses = []
 
     for record in history:
         if step_every > 1 and record["step"] % step_every != 0:
@@ -107,11 +109,13 @@ def evaluate_history(
         steps.append(record["step"])
         param_errors.append(parameter_error(record["theta"], theta_star))
         pred_mses.append(prediction_mse(record["theta"], generator, n_test))
+        losses.append(float(record.get("loss", np.nan)))
 
     return {
         "steps": np.array(steps),
         "param_error": np.array(param_errors),
         "pred_mse": np.array(pred_mses),
+        "loss": np.array(losses),
     }
 
 
@@ -138,6 +142,8 @@ def aggregate_repeats(
             'param_error_median': (M,), 'param_error_q25': (M,), 'param_error_q75': (M,),
             'pred_mse_mean': (M,), 'pred_mse_std': (M,),
             'pred_mse_median': (M,), 'pred_mse_q25': (M,), 'pred_mse_q75': (M,),
+            'loss_mean': (M,), 'loss_std': (M,),
+            'loss_median': (M,), 'loss_q25': (M,), 'loss_q75': (M,),
         }
     """
     # Align to shortest history
@@ -153,6 +159,7 @@ def aggregate_repeats(
 
     param_err = np.array([e["param_error"] for e in evals])  # (n_repeats, M)
     pred_mse = np.array([e["pred_mse"] for e in evals])
+    loss = np.array([e["loss"] for e in evals])              # (n_repeats, M)
 
     return {
         "steps": common_steps,
@@ -166,4 +173,11 @@ def aggregate_repeats(
         "pred_mse_median": np.median(pred_mse, axis=0),
         "pred_mse_q25": np.quantile(pred_mse, 0.25, axis=0),
         "pred_mse_q75": np.quantile(pred_mse, 0.75, axis=0),
+        # Loss is algorithm-specific and may be NaN or non-positive (e.g. the
+        # centered distance-covariance objective), so use NaN-aware statistics.
+        "loss_mean": np.nanmean(loss, axis=0),
+        "loss_std": np.nanstd(loss, axis=0),
+        "loss_median": np.nanmedian(loss, axis=0),
+        "loss_q25": np.nanquantile(loss, 0.25, axis=0),
+        "loss_q75": np.nanquantile(loss, 0.75, axis=0),
     }

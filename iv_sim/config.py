@@ -130,6 +130,28 @@ class SimulationConfig:
     sieve2_proj_radius: float = 10.0 # projection radius (<=0 disables)
     sieve2_average: bool = True      # Polyak-Ruppert averaging
 
+    # --- Sieve3 (two-batch sieve GMM with identity weighting + averaging) ---
+    sieve3_lr: float = 1e-3          # conservative: W=I, no preconditioner
+    sieve3_lr_decay: float = 0.5     # step-size exponent a: alpha_t = lr0 * t^{-a}
+    sieve3_degree: int = 2           # sieve degree (1 or 2)
+    sieve3_basis: str = "hermite"    # "hermite" (orthonormal for N(0,I)) or "poly"
+    sieve3_B_M: int = 1              # Jacobian mini-batch size
+    sieve3_B_m: int = 1              # moment mini-batch size
+    sieve3_clip: float = 10.0        # cap on per-step parameter displacement
+    sieve3_average: bool = True      # Polyak-Ruppert averaging
+
+    # --- GMM ablation experiments (algorithm name: "gmmexp") ---
+    gmmexp_basis: str = "lin"             # "lin" | "herm2" | "poly2" (+ herm1/poly1)
+    gmmexp_precond: str = "gd"            # "gd" (gradient) | "nt" (preconditioned)
+    gmmexp_weight: str = "i"              # "i" (W=I) | "d" (diag) | "f" (full Omega^-1)
+    gmmexp_lr: float | None = None        # None -> per-precond default (gd 1e-3, nt 0.1)
+    gmmexp_lr_decay: float | None = None  # None -> 0.5
+    gmmexp_B_M: int = 1                   # Jacobian mini-batch size
+    gmmexp_B_m: int = 1                   # moment mini-batch size
+    gmmexp_clip: float = 10.0             # cap on per-step parameter displacement
+    gmmexp_reg: float = 1e-2              # ridge for weighting / preconditioner
+    gmmexp_average: bool = True           # Polyak-Ruppert averaging
+
     # --- Training ---
     n_iterations: int = 100000
     verbose_every: int = 50000

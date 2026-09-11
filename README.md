@@ -411,7 +411,9 @@ The parameter is updated by
 
 ### Sieve GMM (Sieve-SGMM)
 
-The CMR objective above rests on the conditional moment restriction $` \mathbb{E}(\varepsilon_y \vert \boldsymbol{z}) = 0 `$, which is equivalent to the infinite family of moment conditions $` \mathbb{E}[\psi(\boldsymbol{z})\,\varepsilon_y]=0 `$ for all suitable $` \psi `$. Sieve GMM discretises this family with a fixed, finite instrument basis $` \psi_K(\boldsymbol{z}) \in \mathbb{R}^{K} `$ (a *sieve*) and solves the resulting GMM with an online (stochastic-approximation) scheme. It consumes a single stream sample per step: no two-sample oracle and no first-stage nuisance model are required.
+The CMR objective above rests on the conditional moment restriction $` \mathbb{E}(\varepsilon_y \vert \boldsymbol{z}) = 0 `$, which is equivalent to the infinite family of moment conditions $` \mathbb{E}[\psi(\boldsymbol{z})\,\varepsilon_y]=0 `$ for all suitable $` \psi `$. 
+Since the optimal function $`\phi(\boldsymbol{z}) = \mathbb{E}(\nabla g(\boldsymbol{\theta}; \boldsymbol{x}) \vert \boldsymbol{z})`$ is related to nuisance parameters ($`\gamma`$), it is hard to estimate $`\theta`$.
+Hence, we consider using a fixed, finite instrument basis $` \psi_K(\boldsymbol{z}) \in \mathbb{R}^{d_K} `$ (a *sieve*) and solves the resulting GMM with an online (stochastic-approximation) scheme. It consumes a single stream sample per step: **no two-sample oracle and no first-stage nuisance model are required**.
 
 The key device is that the current sample is used only for the moment $` m_t `$, while the Jacobian and the weighting matrix are built from **past** samples only. Hence the preconditioner $` A_{t-1} `$ is $` \mathcal{F}_{t-1} `$-measurable and
 
@@ -519,7 +521,42 @@ V_K = \big(M_K^\top \Omega_K^{-1} M_K\big)^{-1},
 
 i.e. first-order equivalence with the offline optimal finite-moment GMM. For genuinely nonparametric $` g `$ or large MLPs one needs $` K=K_T\to\infty `$, regularisation and stronger identification; only local identification / functional convergence can be claimed, and weak IV / non-convexity are not circumvented.
 
-#### Relationship between Sieve1 and Sieve2
+#### Sieve3
+The objective can be formulated as 
+```math
+F(\boldsymbol{\theta}) = \mathbb{E}\left[ (Y-g(\boldsymbol{\theta}; \boldsymbol{x})) \psi_K(\boldsymbol{z})^\top \right]
+W \ 
+\mathbb{E}\left[ \psi_K(\boldsymbol{z}) (Y-g(\boldsymbol{\theta}; \boldsymbol{x}))  \right],
+```
+the derivative is 
+```math
+\nabla F(\boldsymbol{\theta}) \propto \mathbb{E} \left[ \psi_K(\boldsymbol{z}_1)^\top W \psi_K(\boldsymbol{z}_2) \cdot  \left( g(\boldsymbol{\theta}; \boldsymbol{x}_2) - Y_2 \right) \nabla g(\boldsymbol{\theta}; \boldsymbol{x}_1)   \right].
+```
 
-Both are single-stream, online Sieve-SGMM for IV sharing the identical unbiasedness mechanism (a predictable preconditioner). Sieve2 upgrades Sieve1 by (i) adding the intercept to the basis, (ii) replacing the diagonal weight with the full $` \widehat\Omega^{-1} `$, (iii) moving the step-size exponent into $` (1/2,1) `$ (e.g. $` t^{-0.75} `$) and letting $` \lambda_t\to0 `$, (iv) adding the projection $` \Pi_\Theta `$, and (v) adding Polyak–Ruppert averaging — the ingredients required for the a.s. convergence and CLT statements above.
+Note that, if we take the orthonormal Hermite basis, the optimal weighting matrix is
 
+```math
+W = \mathbb{E}(\psi_K(\boldsymbol{z}) \psi_K(\boldsymbol{z})^\top \cdot \varepsilon_Y^2) = \mathbb{E}(\psi_K(\boldsymbol{z}) \psi_K(\boldsymbol{z})^\top) = I,
+```
+
+the second equality holds if $`\boldsymbol{z}`$ and $`\varepsilon_Y`$ is independent (or, more precisely, there is no heteroskedasticity, which means that $`\mathbb{E}(\varepsilon_Y^2 | \boldsymbol{z})`$ does not depend on $`\boldsymbol{z}`$).
+
+Therefore, we can formulate the algorithms below:
+```math
+\boldsymbol{\theta}_{t+1} = \boldsymbol{\theta}_{t} - \alpha_{t+1} \widetilde{M}_{B_M}(\boldsymbol{\theta}_t)^\top  \widetilde{m}_{B_m}(\boldsymbol{\theta}_t),
+```
+
+where
+
+```math
+\widetilde{M}_{B_M}(\boldsymbol{\theta}) = \frac{1}{B_M} \sum_{i=1}^{B_M} \psi_K(\boldsymbol{z}_i) \nabla_{\theta} g(\boldsymbol{\theta} ; \boldsymbol{x}_{i})^\top, \\
+\widetilde{m}_{B_m}(\boldsymbol{\theta}) = \frac{1}{B_m} \sum_{j=1}^{B_m} \psi_K(\boldsymbol{z}_i) \left(g(\boldsymbol{\theta}; \boldsymbol{x}_i) - y_i\right), \\
+```
+where we set $`\psi_K(\boldsymbol{z})`$ as the Hermite basis.
+The average over all past updates is recorded:
+
+```math
+\bar{\boldsymbol{\theta}}_{t+1} = \frac{t-1}{t} \bar{\boldsymbol{\theta}}_t + \frac{1}{t} \boldsymbol{\theta}_{t+1}.
+```
+
+The final estimator is given by the overall average $` \bar{\boldsymbol{\theta}}_{N} `$, where $` N `$ is the total number of iterations.
