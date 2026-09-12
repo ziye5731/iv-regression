@@ -188,7 +188,8 @@ ALGO_SIEVE3_AVERAGE = True     # Polyak-Ruppert averaging
 # Any hyperparameter below may be a scalar or a LIST; LISTs are expanded into
 # the full cross-product (one run per combination), so a single
 # ALGO_LIST = ["gmmexp"] entry can run the whole grid.
-# Result labels: gmmexp_{basis}_{precond}_{i|invS}[_B{B_M}m{B_m}]
+# Result labels encode every axis, so each combination has its own log file:
+#   gmmexp_{basis}_{precond}_{i|invS}_{run|batch}[_B{B_M}m{B_m}]
 #   basis    : "lin" (= psi(z)=z, NO sieve) | "herm1" | "herm2" | "herm3" | "poly1" | "poly2"
 #   precond  : "gd" (plain gradient)        | "nt" (Newton-type preconditioning)
 #   w_type   : "identity" (W = I)           | "inv_var" (W = diag(1/(S+lambda)):
@@ -221,7 +222,7 @@ ALGO_GMMEXP_AVERAGE = True         # Polyak-Ruppert averaging
 # 3. Other
 # ============================================================================
 SEED = 10
-N_ITERATIONS = int(1e7)
+N_ITERATIONS = int(1e6)
 N_REPEATS = 10
 VERBOSE_EVERY = int(1e5)
 HISTORY_EVERY = None          # record training history every N iterations

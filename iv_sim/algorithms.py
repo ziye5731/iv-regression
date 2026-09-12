@@ -1599,7 +1599,7 @@ class GMMExp(BaseIVAlgorithm):
     in the config (``ALGO_GMMEXP_*``); the runner then enumerates the full
     cross-product, so a single ``ALGO_LIST = ["gmmexp"]`` entry expands into one
     run per combination (result labels:
-    ``gmmexp_{basis}_{precond}_{i|invS}``).
+    ``gmmexp_{basis}_{precond}_{i|invS}_{run|batch}``).
 
     Reproduction of the existing algorithms (also set lr and average):
       First-Order SLIM : basis="lin",   precond="gd", w_type="identity",

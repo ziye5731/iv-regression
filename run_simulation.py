@@ -194,6 +194,10 @@ def _parse_gmmexp_configs(cfg) -> list[dict]:
     ALGO_LIST = ["gmmexp"] entry expands into many runs (the same idea as
     ALGO_SLIM_CONFIGS).  Each returned dict also carries "label" (result key /
     legend) and "sp" (samples/step).
+
+    The label encodes EVERY axis that can vary
+    (``gmmexp_{basis}_{precond}_{i|invS}_{run|batch}[_B{B_M}m{B_m}]``) so that
+    each combination gets its own log file and result key.
     """
     grid = {
         "basis":    getattr(cfg, "ALGO_GMMEXP_BASIS", "lin"),
@@ -207,13 +211,23 @@ def _parse_gmmexp_configs(cfg) -> list[dict]:
     combos = [dict(zip(grid, values)) for values in itertools.product(*axes)]
     vary_batch = len({(c["B_M"], c["B_m"]) for c in combos}) > 1
     w_tok = {"identity": "i", "inv_var": "invS"}
+    m_tok = {"running": "run", "batch": "batch"}
     for c in combos:
         label = (f"gmmexp_{c['basis']}_{c['precond']}_"
-                 f"{w_tok.get(c['w_type'], c['w_type'])}")
+                 f"{w_tok.get(c['w_type'], c['w_type'])}_"
+                 f"{m_tok.get(c['m_source'], c['m_source'])}")
         if vary_batch:
             label += f"_B{c['B_M']}m{c['B_m']}"
         c["label"] = label
         c["sp"] = int(c["B_M"]) + int(c["B_m"])
+
+    # Guard: duplicate labels would share one log file and one result key.
+    labels = [c["label"] for c in combos]
+    if len(set(labels)) != len(labels):
+        dupes = sorted({x for x in labels if labels.count(x) > 1})
+        raise ValueError(
+            f"Duplicate gmmexp labels {dupes}: every varying axis must appear "
+            f"in the label (basis / precond / w_type / m_source / batches).")
     return combos
 
 
