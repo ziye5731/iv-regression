@@ -141,9 +141,10 @@ class SimulationConfig:
     sieve3_average: bool = True      # Polyak-Ruppert averaging
 
     # --- GMM ablation experiments (algorithm name: "gmmexp") ---
-    gmmexp_basis: str = "lin"             # "lin" | "herm2" | "poly2" (+ herm1/poly1)
+    gmmexp_basis: str = "lin"             # lin|herm1|herm2|herm3|poly1|poly2
     gmmexp_precond: str = "gd"            # "gd" (gradient) | "nt" (preconditioned)
-    gmmexp_weight: str = "i"              # "i" (W=I) | "d" (diag) | "f" (full Omega^-1)
+    gmmexp_w_type: str = "identity"       # "identity" (W=I) | "inv_var" (=1/(S+lam))
+    gmmexp_m_source: str = "running"      # "running" (past avg) | "batch" (current)
     gmmexp_lr: float | None = None        # None -> per-precond default (gd 1e-3, nt 0.1)
     gmmexp_lr_decay: float | None = None  # None -> 0.5
     gmmexp_B_M: int = 1                   # Jacobian mini-batch size

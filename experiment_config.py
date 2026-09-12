@@ -10,7 +10,7 @@ This file is copied to the results directory for reproducibility.
 # 1. DGP  (data generating process)
 # ============================================================================
 # Modes: "tosg", "otsg", "deepgmm", "quadratic", "logistic", "expiv", "probit", "sine"
-DGP_MODE = "probit"
+DGP_MODE = "quadratic"
 
 # --- tosg ---
 #   z     ~ N(0, I)
@@ -185,29 +185,37 @@ ALGO_SIEVE3_CLIP = 10.0        # cap on per-step parameter displacement
 ALGO_SIEVE3_AVERAGE = True     # Polyak-Ruppert averaging
 
 # --- GMM ablation experiments (algorithm name: "gmmexp") ---
-# The three ablation factors are ordinary hyperparameters; give any of them a
-# LIST and the runner enumerates the full cross-product (one run per
-# combination), so a single ALGO_LIST = ["gmmexp"] entry expands into many runs
-# (same pattern as ALGO_SLIM_CONFIGS).  Result labels are
-#   gmmexp_{basis}_{precond}_{weight}[_B{B_M}m{B_m}]
-#   basis   : "lin"  (= psi(z)=z, NO sieve) | "herm2" | "poly2"
-#   precond : "gd"   (plain gradient)       | "nt" (Newton-type preconditioning)
-#   weight  : "i"    (W = I)                | "d" (diag) | "f" (full Omega^-1)
-# Everything else is held fixed across the grid (B_M+B_m samples/step, past-only
-# running Mbar/Om_bar, W normalised to trace(W)=p, Polyak-Ruppert averaging), so
-# the grid isolates the sieve / preconditioning / weighting effects.
-# Reference points: lin_gd_i ~ First-Order SLIM (W=I); herm2_gd_i ~ Sieve3;
-#                   herm2_nt_d ~ Sieve1.
-ALGO_GMMEXP_BASIS = ["lin", "herm2"]
+# Any hyperparameter below may be a scalar or a LIST; LISTs are expanded into
+# the full cross-product (one run per combination), so a single
+# ALGO_LIST = ["gmmexp"] entry can run the whole grid.
+# Result labels: gmmexp_{basis}_{precond}_{i|invS}[_B{B_M}m{B_m}]
+#   basis    : "lin" (= psi(z)=z, NO sieve) | "herm1" | "herm2" | "herm3" | "poly1" | "poly2"
+#   precond  : "gd" (plain gradient)        | "nt" (Newton-type preconditioning)
+#   w_type   : "identity" (W = I)           | "inv_var" (W = diag(1/(S+lambda)):
+#                                                        divide by S -> adaptive step)
+#   m_source : "running" (op. Jacobian = running average of past batches)
+#              "batch"   (op. Jacobian = the current batch)
+# NOTE: LR must be paired with w_type -- "identity" needs a small LR, "inv_var"
+# needs a much larger one (W ~ 1/S is small while theta is still far away).
+# Recommended: keep ALGO_GMMEXP_W_TYPE scalar and run the grid once per value.
+# Reproducing the existing algorithms (also set LR / LR_DECAY / AVERAGE):
+#   First-Order SLIM : basis="lin",   precond="gd", w_type="identity",
+#                      m_source="batch",   B_M=8, B_m=8, LR=0.01, AVERAGE=False
+#   Sieve3           : basis="herm2", precond="gd", w_type="identity",
+#                      m_source="batch",   B_M=1, B_m=1, LR=0.01, AVERAGE=True
+#   Sieve1           : basis="poly2", precond="nt", w_type="inv_var",
+#                      m_source="running", B_M=1, B_m=1, LR=0.1,  AVERAGE=False
+ALGO_GMMEXP_BASIS = ["lin", "herm2", "herm3"]
 ALGO_GMMEXP_PRECOND = ["gd", "nt"]
-ALGO_GMMEXP_WEIGHT = ["i", "d"]
-ALGO_GMMEXP_B_M = 1            # scalar or list
-ALGO_GMMEXP_B_m = 1            # scalar or list
-ALGO_GMMEXP_LR = 0.01          # None -> per-precond default (gd: 1e-3, nt: 0.1)
+ALGO_GMMEXP_W_TYPE = ["identity", "inv_var"]    # "identity" | "inv_var"
+ALGO_GMMEXP_M_SOURCE = ["batch", "running"]   # "running" | "batch"
+ALGO_GMMEXP_B_M = 1                # scalar or list
+ALGO_GMMEXP_B_m = 1                # scalar or list
+ALGO_GMMEXP_LR = 0.01              # None -> per-precond default (gd: 1e-3, nt: 0.1)
 ALGO_GMMEXP_LR_DECAY = 0.5
-ALGO_GMMEXP_CLIP = 10.0        # cap on per-step parameter displacement
-ALGO_GMMEXP_REG = 1e-2         # ridge for the weighting / preconditioner
-ALGO_GMMEXP_AVERAGE = True     # Polyak-Ruppert averaging (held fixed for all)
+ALGO_GMMEXP_CLIP = 10.0            # cap on per-step parameter displacement
+ALGO_GMMEXP_REG = 1e-2             # ridge for the weighting / preconditioner
+ALGO_GMMEXP_AVERAGE = True         # Polyak-Ruppert averaging
 
 # ============================================================================
 # 3. Other
@@ -222,7 +230,7 @@ OUTDIR = None
 SAVE_PLOT = None
 X_AXIS_SCALE = "log"  # 'linear', 'log', 'symlog', 'asinh', 'logit', 'function', 'functionlog'
 
-N_JOBS = 2                         # parallel algos (> 1 uses multiprocessing)
+N_JOBS = 4                         # parallel algos (> 1 uses multiprocessing)
 EARLY_STOP_THRESHOLD = 0.0         # stop when param error change < this
 EARLY_STOP_PATIENCE = 0            # how many checks before stopping
 

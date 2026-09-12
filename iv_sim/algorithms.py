@@ -918,10 +918,15 @@ def _sieve_poly_features(
     degree = 1 -> [z_1, ..., z_dz]
     degree = 2 -> degree-1 features + [z_i z_j for i <= j]
 
-    If include_intercept is True, a constant column of ones is prepended.
+    Only degree 1 and 2 are implemented (degree 3 is available through the
+    orthonormal Hermite basis, "herm3").  If include_intercept is True, a
+    constant column of ones is prepended.
 
     Returns (B, p).
     """
+    if degree not in (1, 2):
+        raise ValueError(
+            f"_sieve_poly_features supports degree 1 or 2, got {degree}")
     d_z = z.shape[1]
     feats = []
     if include_intercept:
@@ -941,14 +946,18 @@ def _sieve_hermite_features(
 ) -> np.ndarray:
     """Orthonormal (probabilists') Hermite sieve features of z, z ~ N(0, I).
 
-    Tensor-product basis up to `degree` (supports degree 1 and 2):
+    Tensor-product basis up to `degree` (supports degree 1, 2 and 3):
 
         degree 1: H_1(z_i) = z_i
         degree 2: H_2(z_i) = (z_i^2 - 1)/sqrt(2), and
                   H_1(z_i) H_1(z_j) = z_i z_j  (i < j)
+        degree 3: H_3(z_i) = (z_i^3 - 3 z_i)/sqrt(6),
+                  H_2(z_i) H_1(z_j)  (i != j), and
+                  H_1(z_i) H_1(z_j) H_1(z_k) = z_i z_j z_k  (i < j < k)
 
-    If include_intercept is True, a constant column of ones is prepended
-    (the constant H_0 = 1 is normally excluded).
+    All blocks are orthonormal and mutually orthogonal, i.e.
+    E[psi psi^T] = I.  If include_intercept is True, a constant column of ones
+    is prepended (the constant H_0 = 1 is normally excluded).
 
     Returns (B, p).
     """
@@ -964,6 +973,25 @@ def _sieve_hermite_features(
         for i in range(d_z):
             for j in range(i + 1, d_z):
                 cols.append((z[:, i] * z[:, j]).reshape(-1, 1))
+        feats.append(np.concatenate(cols, axis=1))
+    if degree >= 3:
+        cols = []
+        # H_3(z_i) = (z_i^3 - 3 z_i)/sqrt(6)
+        for i in range(d_z):
+            cols.append(((z[:, i] ** 3 - 3.0 * z[:, i])
+                         / np.sqrt(6.0)).reshape(-1, 1))
+        # H_2(z_i) * H_1(z_j),  i != j
+        for i in range(d_z):
+            h2 = (z[:, i] ** 2 - 1.0) / np.sqrt(2.0)
+            for j in range(d_z):
+                if j == i:
+                    continue
+                cols.append((h2 * z[:, j]).reshape(-1, 1))
+        # z_i z_j z_k,  i < j < k
+        for i in range(d_z):
+            for j in range(i + 1, d_z):
+                for k in range(j + 1, d_z):
+                    cols.append((z[:, i] * z[:, j] * z[:, k]).reshape(-1, 1))
         feats.append(np.concatenate(cols, axis=1))
     return np.concatenate(feats, axis=1)
 
@@ -1535,15 +1563,22 @@ class GMMExp(BaseIVAlgorithm):
     else is held fixed so the factors are isolated:
 
       basis      : "lin"   -> psi(z) = z                  (no sieve)
-                   "herm2" -> orthonormal Hermite sieve, degree 2
-                   "poly2" -> polynomial sieve, degree 2
-                   ("herm1" / "poly1" are also accepted)
-      precond    : "gd"    -> direction = Mbar^T W m_t     (plain gradient)
-                   "nt"    -> direction = (Mbar^T W Mbar + lam I)^{-1}
-                                          Mbar^T W m_t    (Newton-type)
-      weight     : "i"     -> W = I
-                   "d"     -> W = diag(1 / (diag(Om_bar) + lam))
-                   "f"     -> W = (Om_bar + lam I)^{-1}
+                   "herm1"/"herm2"/"herm3" -> orthonormal Hermite sieve,
+                   "poly1"/"poly2" -> polynomial sieve
+      precond    : "gd"    -> direction = M_op^T W m_t     (plain gradient)
+                   "nt"    -> direction = (M_op^T W M_op + lam I)^{-1}
+                                          M_op^T W m_t    (Newton-type)
+      w_type     : "identity" -> W = I
+                   "inv_var"  -> W = diag(1 / (diag(Om_bar) + lam))
+                                 (Sieve1's weighting: dividing by S makes
+                                  W an adaptive step-size normaliser)
+
+    plus one structural switch:
+
+      m_source   : "running" -> M_op = Mbar (running average of past batches,
+                                              Sieve1/Sieve2 style)
+                   "batch"   -> M_op = the current Jacobian batch
+                                              (SLIM / Sieve3 style)
 
     Fixed design decisions (identical for every variant):
 
@@ -1554,32 +1589,39 @@ class GMMExp(BaseIVAlgorithm):
         running averages of *past* batches only and are updated *after* the
         parameter step, so the update direction is ``F_{t-1}``-measurable and
         (conditionally) unbiased;
-      * ``gd`` and ``nt`` reuse the very same ``Mbar`` and ``W``; the only
+      * ``gd`` and ``nt`` reuse the very same ``M_op`` and ``W``; the only
         difference between them is the Newton matrix inverse;
-      * ``W`` is normalised to ``trace(W) = p`` (the scale of ``I``), which also
-        keeps the weighting well conditioned at initialisation;
-      * Polyak-Ruppert averaging is applied to every variant.
+      * ``W`` is used exactly as computed - no rescaling - so its magnitude
+        (which carries the adaptive step size in ``inv_var``) is preserved;
+      * Polyak-Ruppert averaging is switchable (``average``).
 
-    Any of basis / precond / weight / B_M / B_m may be set to a LIST in the
-    config (``ALGO_GMMEXP_*``); the runner then enumerates the full
+    Any of basis / precond / w_type / m_source / B_M / B_m may be set to a LIST
+    in the config (``ALGO_GMMEXP_*``); the runner then enumerates the full
     cross-product, so a single ``ALGO_LIST = ["gmmexp"]`` entry expands into one
     run per combination (result labels:
-    ``gmmexp_{basis}_{precond}_{weight}``).
+    ``gmmexp_{basis}_{precond}_{i|invS}``).
 
-    Comparing the variants therefore isolates the effects of the sieve, the
-    preconditioning and the weighting matrix.
+    Reproduction of the existing algorithms (also set lr and average):
+      First-Order SLIM : basis="lin",   precond="gd", w_type="identity",
+                         m_source="batch",   B_M=B_m=8, average=False
+      Sieve3           : basis="herm2", precond="gd", w_type="identity",
+                         m_source="batch",   B_M=B_m=1, average=True
+      Sieve1           : basis="poly2", precond="nt", w_type="inv_var",
+                         m_source="running", B_M=B_m=1, average=False
     """
 
     # --- factor defaults (overridden by kwargs / ALGO_GMMEXP_* config) ---
     basis: str = "lin"
     precond: str = "gd"
-    weight: str = "i"
+    w_type: str = "identity"
+    m_source: str = "running"
 
     # encoded basis -> (feature kind, sieve degree)
     _BASIS_MAP = {
         "lin":   ("lin", 1),
         "herm1": ("herm", 1),
         "herm2": ("herm", 2),
+        "herm3": ("herm", 3),
         "poly1": ("poly", 1),
         "poly2": ("poly", 2),
     }
@@ -1591,7 +1633,8 @@ class GMMExp(BaseIVAlgorithm):
         seed: int | None = None,
         basis: str | None = None,
         precond: str | None = None,
-        weight: str | None = None,
+        w_type: str | None = None,
+        m_source: str | None = None,
         B_M: int | None = None,
         B_m: int | None = None,
         clip: float | None = None,
@@ -1606,8 +1649,10 @@ class GMMExp(BaseIVAlgorithm):
             config, "gmmexp_basis", self.basis)
         self.precond = precond if precond is not None else getattr(
             config, "gmmexp_precond", self.precond)
-        self.weight = weight if weight is not None else getattr(
-            config, "gmmexp_weight", self.weight)
+        self.w_type = w_type if w_type is not None else getattr(
+            config, "gmmexp_w_type", self.w_type)
+        self.m_source = m_source if m_source is not None else getattr(
+            config, "gmmexp_m_source", self.m_source)
         if self.basis not in self._BASIS_MAP:
             raise ValueError(f"Unknown basis '{self.basis}'; "
                              f"valid: {sorted(self._BASIS_MAP)}")
@@ -1623,8 +1668,12 @@ class GMMExp(BaseIVAlgorithm):
 
         if self.precond not in ("gd", "nt"):
             raise ValueError(f"Unknown precond '{self.precond}'")
-        if self.weight not in ("i", "d", "f"):
-            raise ValueError(f"Unknown weight '{self.weight}'")
+        if self.w_type not in ("identity", "inv_var"):
+            raise ValueError(f"Unknown w_type '{self.w_type}' "
+                             f"(use 'identity' or 'inv_var')")
+        if self.m_source not in ("running", "batch"):
+            raise ValueError(f"Unknown m_source '{self.m_source}' "
+                             f"(use 'running' or 'batch')")
         if self.B_M < 1 or self.B_m < 1:
             raise ValueError("GMMExp batch sizes must be >= 1")
 
@@ -1643,7 +1692,11 @@ class GMMExp(BaseIVAlgorithm):
         if self.basis_kind == "lin" or self.degree == 1:
             return d_z
         if self.basis_kind == "herm":
-            return d_z + d_z + d_z * (d_z - 1) // 2   # H_1 + H_2 + cross
+            p = d_z + d_z + d_z * (d_z - 1) // 2          # H_1 + H_2 + cross
+            if self.degree >= 3:
+                p += d_z + d_z * (d_z - 1)                # H_3 + H_2*H_1
+                p += d_z * (d_z - 1) * (d_z - 2) // 6     # triple products
+            return p
         return d_z + d_z * (d_z + 1) // 2             # linear + quadratics
 
     def _features(self, z: np.ndarray) -> np.ndarray:
@@ -1655,22 +1708,20 @@ class GMMExp(BaseIVAlgorithm):
         return _sieve_poly_features(z, self.degree, include_intercept=False)
 
     def _weight_matrix(self) -> np.ndarray:
-        """W built from PAST running statistics only (measurable w.r.t. F_{t-1})."""
-        if self.weight == "i":
+        """W built from PAST running statistics only (measurable w.r.t. F_{t-1}).
+
+        "identity": W = I - no weighting (reproduces SLIM / Sieve3).
+        "inv_var" : W = diag(1 / (diag(Om_bar) + lam)) - Sieve1's weighting.
+                    Its magnitude is deliberately NOT rescaled: dividing the
+                    direction by the moment variance is what turns W into an
+                    adaptive step-size normaliser (W ~ 1/E[eps^2]).
+        """
+        if self.w_type == "identity":
             return np.eye(self._p)
-        lam = self.reg
-        if self.weight == "d":
-            W = np.diag(1.0 / (np.diag(self._Om_bar) + lam))
-        else:
-            W = np.linalg.solve(self._Om_bar + lam * np.eye(self._p),
-                                np.eye(self._p))
-        tr = float(np.trace(W))
-        if tr > 0:
-            W = W * (self._p / tr)   # normalise: trace(W) = p (scale of I)
-        return W
+        return np.diag(1.0 / (np.diag(self._Om_bar) + self.reg))
 
     def _tag(self) -> str:
-        return f"gmmexp {self.basis}/{self.precond}/{self.weight}"
+        return f"gmmexp {self.basis}/{self.precond}/{self.w_type}/{self.m_source}"
 
     # ------------------------------------------------------------------
     # BaseIVAlgorithm interface
@@ -1705,7 +1756,8 @@ class GMMExp(BaseIVAlgorithm):
         z_M, x_M = z_all[:B_M], x_all[:B_M]
         z_m, x_m, y_m = z_all[B_M:], x_all[B_M:], y_all[B_M:]
 
-        # Jacobian batch (used only to keep the running Mbar up to date)
+        # Jacobian batch: used to update the running Mbar, and directly as the
+        # operator when m_source == "batch" (SLIM / Sieve3).
         psi_M = self._features(z_M)
         grad_M = self.model.gradient(self.theta, x_M)
         J_batch = (psi_M.T @ grad_M) / B_M                # (p, d)
@@ -1715,13 +1767,16 @@ class GMMExp(BaseIVAlgorithm):
         err_m = self.model.predict(self.theta, x_m) - y_m  # (B_m, 1)
         m_t = (psi_m.T @ err_m) / B_m                      # (p, 1)
 
-        # Direction: identical Mbar and W for "gd" and "nt"; the only
+        # Direction: identical M_op and W for "gd" and "nt"; the only
         # difference is whether the Newton matrix inverse is applied.
+        # M_op is the running past average by default, or the current batch
+        # when m_source == "batch" (SLIM / Sieve3).
+        M_op = J_batch if self.m_source == "batch" else self._M_bar
         W = self._weight_matrix()                          # (p, p)
-        MtW = self._M_bar.T @ W                            # (d, p)
+        MtW = M_op.T @ W                                   # (d, p)
 
         if self.precond == "nt":
-            MtWM = MtW @ self._M_bar                       # (d, d)
+            MtWM = MtW @ M_op                              # (d, d)
             d, p = MtWM.shape
             if d <= p:
                 reg_eff = self.reg * max(1.0, float(np.trace(MtWM)) / d)

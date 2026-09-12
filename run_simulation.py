@@ -105,7 +105,10 @@ def build_simulation_config(cfg) -> SimulationConfig:
     config.sieve3_average = getattr(cfg, "ALGO_SIEVE3_AVERAGE", True)
     config.gmmexp_basis = _scalar(getattr(cfg, "ALGO_GMMEXP_BASIS", "lin"), "lin")
     config.gmmexp_precond = _scalar(getattr(cfg, "ALGO_GMMEXP_PRECOND", "gd"), "gd")
-    config.gmmexp_weight = _scalar(getattr(cfg, "ALGO_GMMEXP_WEIGHT", "i"), "i")
+    config.gmmexp_w_type = _scalar(
+        getattr(cfg, "ALGO_GMMEXP_W_TYPE", "identity"), "identity")
+    config.gmmexp_m_source = _scalar(
+        getattr(cfg, "ALGO_GMMEXP_M_SOURCE", "running"), "running")
     config.gmmexp_lr = _scalar(getattr(cfg, "ALGO_GMMEXP_LR", None), None)
     config.gmmexp_lr_decay = _scalar(
         getattr(cfg, "ALGO_GMMEXP_LR_DECAY", 0.5), 0.5)
@@ -186,23 +189,27 @@ def _scalar(value, default):
 def _parse_gmmexp_configs(cfg) -> list[dict]:
     """Expand the ALGO_GMMEXP_* hyperparameters into one dict per combination.
 
-    Any of basis / precond / weight / B_M / B_m may be given as a list; the
-    full cross-product is enumerated, so a single ALGO_LIST = ["gmmexp"] entry
-    expands into many runs (the same idea as ALGO_SLIM_CONFIGS).  Each returned
-    dict also carries "label" (result key / legend) and "sp" (samples/step).
+    Any of basis / precond / w_type / m_source / B_M / B_m may be given as a
+    list; the full cross-product is enumerated, so a single
+    ALGO_LIST = ["gmmexp"] entry expands into many runs (the same idea as
+    ALGO_SLIM_CONFIGS).  Each returned dict also carries "label" (result key /
+    legend) and "sp" (samples/step).
     """
     grid = {
-        "basis":   getattr(cfg, "ALGO_GMMEXP_BASIS", "lin"),
-        "precond": getattr(cfg, "ALGO_GMMEXP_PRECOND", "gd"),
-        "weight":  getattr(cfg, "ALGO_GMMEXP_WEIGHT", "i"),
-        "B_M":     getattr(cfg, "ALGO_GMMEXP_B_M", 1),
-        "B_m":     getattr(cfg, "ALGO_GMMEXP_B_m", 1),
+        "basis":    getattr(cfg, "ALGO_GMMEXP_BASIS", "lin"),
+        "precond":  getattr(cfg, "ALGO_GMMEXP_PRECOND", "gd"),
+        "w_type":   getattr(cfg, "ALGO_GMMEXP_W_TYPE", "identity"),
+        "m_source": getattr(cfg, "ALGO_GMMEXP_M_SOURCE", "running"),
+        "B_M":      getattr(cfg, "ALGO_GMMEXP_B_M", 1),
+        "B_m":      getattr(cfg, "ALGO_GMMEXP_B_m", 1),
     }
     axes = [v if isinstance(v, (list, tuple)) else [v] for v in grid.values()]
     combos = [dict(zip(grid, values)) for values in itertools.product(*axes)]
     vary_batch = len({(c["B_M"], c["B_m"]) for c in combos}) > 1
+    w_tok = {"identity": "i", "inv_var": "invS"}
     for c in combos:
-        label = f"gmmexp_{c['basis']}_{c['precond']}_{c['weight']}"
+        label = (f"gmmexp_{c['basis']}_{c['precond']}_"
+                 f"{w_tok.get(c['w_type'], c['w_type'])}")
         if vary_batch:
             label += f"_B{c['B_M']}m{c['B_m']}"
         c["label"] = label
