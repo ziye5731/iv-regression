@@ -75,6 +75,7 @@ class SimulationConfig:
     # --- Structural-noise / scaling knobs (defaults reproduce the README DGPs) ---
     noise_eps_y: float = 1.0            # std of the exogenous outcome noise eps_y
     c_coef: float = 1.0                 # coefficient on (1/sqrt(d_x)) 1^T c in y (endogeneity)
+    first_stage: str = "linear"         # x = phi(gamma*^T z) + c + eps_x; see FIRST_STAGE_FUNCS
     quadratic_theta_scale: float = 1.0  # scales theta* in the Quadratic DGP
     logistic_theta_scale: float = 1.0   # scales theta* in the Logistic DGP
     expiv_index_scale: float = 1.0      # target std of theta*^T x in the ExpIV DGP
@@ -141,7 +142,8 @@ class SimulationConfig:
     sieve3_average: bool = True      # Polyak-Ruppert averaging
 
     # --- GMM ablation experiments (algorithm name: "gmmexp") ---
-    gmmexp_basis: str = "lin"             # lin|herm1|herm2|herm3|poly1|poly2
+    gmmexp_family: str = "herm"           # "herm" (orthonormal) | "poly" (monomials)
+    gmmexp_basis: tuple = (0, 1, 2)       # degree set: (1,)=z, (1,2)=herm2, (0,1,2)=herm2+intercept
     gmmexp_precond: str = "gd"            # "gd" (gradient) | "nt" (preconditioned)
     gmmexp_w_type: str = "identity"       # "identity" (W=I) | "inv_var" (=1/(S+lam))
     gmmexp_m_source: str = "running"      # "running" (past avg) | "batch" (current)

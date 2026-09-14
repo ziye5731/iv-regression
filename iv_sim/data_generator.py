@@ -269,6 +269,42 @@ def create_data_generator(config: SimulationConfig, seed: int | None = None):
     return get_dgp(config.dgp_mode).create_generator(config, seed=seed)
 
 
+# ---------------------------------------------------------------------------
+# First-stage nonlinearity  x = phi(gamma*^T z) + c + eps_x
+# ---------------------------------------------------------------------------
+
+FIRST_STAGE_FUNCS = ("linear", "quadratic", "sin", "tanh", "relu",
+                     "sigmoid", "cubic")
+
+
+def apply_first_stage(s: np.ndarray, first_stage: str) -> np.ndarray:
+    """Apply the first-stage nonlinearity phi elementwise.
+
+    Args:
+        s: linear index gamma*^T z, shape (n, d_x).
+        first_stage: one of FIRST_STAGE_FUNCS.
+
+    Returns:
+        phi(s), same shape as s.
+    """
+    if first_stage == "linear":
+        return s
+    if first_stage == "quadratic":
+        return s ** 2
+    if first_stage == "sin":
+        return np.sin(s)
+    if first_stage == "tanh":
+        return np.tanh(s)
+    if first_stage == "relu":
+        return np.maximum(0.0, s)
+    if first_stage == "sigmoid":
+        return 1.0 / (1.0 + np.exp(-np.clip(s, -500.0, 500.0)))
+    if first_stage == "cubic":
+        return s ** 3
+    raise ValueError(
+        f"Unknown first stage '{first_stage}'. Available: {list(FIRST_STAGE_FUNCS)}")
+
+
 class QuadraticDataGenerator:
     """Data generator for the Quadratic DGP described in README.
 
@@ -294,6 +330,9 @@ class QuadraticDataGenerator:
         # Structural-noise / endogeneity knobs (defaults reproduce the README DGP).
         self.noise_eps_y = getattr(config, "noise_eps_y", 1.0)
         self.c_coef = getattr(config, "c_coef", 1.0)
+        # First-stage map: x = phi(gamma*^T z) + c + eps_x ("linear" by default;
+        # set by composite DGP modes such as "quadratic-sin").
+        self.first_stage = getattr(config, "first_stage", "linear")
         # Normalize the aggregate confounder:  Var(1^T c / sqrt(d_x)) = rho is
         # then independent of d_x, so the endogeneity strength does not grow
         # with the dimension (and is comparable across DGPs).
@@ -305,7 +344,7 @@ class QuadraticDataGenerator:
         eps_x = self.rng.normal(0, np.sqrt(1.0 - self.rho), size=(n, d_x))
         c = self.rng.normal(0, np.sqrt(self.rho), size=(n, d_x))
         eps_y = self.rng.normal(0, self.noise_eps_y, size=(n, 1))
-        x = z @ self.gamma_star + c + eps_x
+        x = apply_first_stage(z @ self.gamma_star, self.first_stage) + c + eps_x
         # g(theta; x) is produced by the QuadraticModel
         y = (self.model.predict(self.theta_star, x)
              + self.c_scale * np.sum(c, axis=1, keepdims=True) + eps_y)
@@ -320,8 +359,8 @@ class QuadraticDataGenerator:
         c2 = self.rng.normal(0, np.sqrt(self.rho), size=(n, self.config.d_x))
         eps_y1 = self.rng.normal(0, self.noise_eps_y, size=(n, 1))
         eps_y2 = self.rng.normal(0, self.noise_eps_y, size=(n, 1))
-        x1 = z @ self.gamma_star + c1 + eps_x1
-        x2 = z @ self.gamma_star + c2 + eps_x2
+        x1 = apply_first_stage(z @ self.gamma_star, self.first_stage) + c1 + eps_x1
+        x2 = apply_first_stage(z @ self.gamma_star, self.first_stage) + c2 + eps_x2
         y1 = (self.model.predict(self.theta_star, x1)
               + self.c_scale * np.sum(c1, axis=1, keepdims=True) + eps_y1)
         y2 = (self.model.predict(self.theta_star, x2)
@@ -334,7 +373,7 @@ class QuadraticDataGenerator:
             eps_x = self.rng.normal(0, np.sqrt(1.0 - self.rho), size=(1, self.config.d_x))
             c = self.rng.normal(0, np.sqrt(self.rho), size=(1, self.config.d_x))
             eps_y = self.rng.normal(0, self.noise_eps_y, size=(1, 1))
-            x = z @ self.gamma_star + c + eps_x
+            x = apply_first_stage(z @ self.gamma_star, self.first_stage) + c + eps_x
             y = (self.model.predict(self.theta_star, x)
                  + self.c_scale * np.sum(c, axis=1, keepdims=True) + eps_y)
             yield z, x, y

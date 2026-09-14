@@ -7,7 +7,9 @@ run_simulation.py -- Main entry point for IV regression simulations.
 Reads ALL hyperparameters from experiment_config.py (or a user-specified config).
 No command-line arguments except --config to point to an alternative config file.
 
-The config file is copied to the output directory for reproducibility.
+The config file is snapshotted into the output directory at startup, before any
+training runs, so that later edits to the config file (e.g. to launch another
+experiment) cannot corrupt the record of this run.
 
 Usage:
     python run_simulation.py                          # reads experiment_config.py
@@ -29,7 +31,7 @@ import numpy as np
 from iv_sim.config import SimulationConfig
 from iv_sim.data_generator import create_data_generator
 from iv_sim.dgp import get_dgp
-from iv_sim.algorithms import TOSGIVaR, FirstOrderSLIM, OTSGIVaR, DistanceCovOpt, DCOV3, DCOV4, Sieve1, Sieve2, Sieve3, GMMExp, get_algorithm
+from iv_sim.algorithms import TOSGIVaR, FirstOrderSLIM, OTSGIVaR, DistanceCovOpt, DCOV3, DCOV4, Sieve1, Sieve2, Sieve3, GMMExp, get_algorithm, gmmexp_basis_token
 from iv_sim.metrics import aggregate_repeats
 from iv_sim.visualization import plot_comparison, plot_comparison_by_samples, print_summary_table, plot_comparison_mse_only, plot_h_star_vs_h
 
@@ -103,7 +105,13 @@ def build_simulation_config(cfg) -> SimulationConfig:
     config.sieve3_B_m = getattr(cfg, "ALGO_SIEVE3_B_m", 1)
     config.sieve3_clip = getattr(cfg, "ALGO_SIEVE3_CLIP", 10.0)
     config.sieve3_average = getattr(cfg, "ALGO_SIEVE3_AVERAGE", True)
-    config.gmmexp_basis = _scalar(getattr(cfg, "ALGO_GMMEXP_BASIS", "lin"), "lin")
+    config.gmmexp_family = _scalar(getattr(cfg, "ALGO_GMMEXP_FAMILY", "herm"), "herm")
+    _basis_cfg = getattr(cfg, "ALGO_GMMEXP_BASIS", (0, 1, 2))
+    if (isinstance(_basis_cfg, (list, tuple)) and len(_basis_cfg) > 0
+            and all(isinstance(x, (int, np.integer)) for x in _basis_cfg)):
+        config.gmmexp_basis = tuple(sorted({int(x) for x in _basis_cfg}))
+    else:
+        config.gmmexp_basis = (0, 1, 2)   # grid run: per-run kwargs carry the set
     config.gmmexp_precond = _scalar(getattr(cfg, "ALGO_GMMEXP_PRECOND", "gd"), "gd")
     config.gmmexp_w_type = _scalar(
         getattr(cfg, "ALGO_GMMEXP_W_TYPE", "identity"), "identity")
@@ -186,6 +194,30 @@ def _scalar(value, default):
     return default if isinstance(value, (list, tuple)) else value
 
 
+def _normalise_gmmexp_bases(spec) -> list:
+    """Normalise ALGO_GMMEXP_BASIS into a list of degree tuples (grid levels).
+
+    A flat list of ints is ONE basis:      [0, 1, 2]  -> [(0,1,2)]
+    A list of tuples/lists is SEVERAL:     [(1,), (1,2)] -> [(1,), (1,2)]
+    """
+    if isinstance(spec, (int, np.integer)):
+        return [(int(spec),)]
+    if not isinstance(spec, (list, tuple)) or len(spec) == 0:
+        raise ValueError(f"Bad ALGO_GMMEXP_BASIS: {spec!r}")
+    if all(isinstance(x, (int, np.integer)) for x in spec):
+        return [tuple(sorted({int(x) for x in spec}))]
+    out = []
+    for x in spec:
+        if isinstance(x, (int, np.integer)):
+            out.append((int(x),))
+        elif isinstance(x, (list, tuple)) and all(
+                isinstance(y, (int, np.integer)) for y in x):
+            out.append(tuple(sorted({int(y) for y in x})))
+        else:
+            raise ValueError(f"Bad ALGO_GMMEXP_BASIS entry: {x!r}")
+    return out
+
+
 def _parse_gmmexp_configs(cfg) -> list[dict]:
     """Expand the ALGO_GMMEXP_* hyperparameters into one dict per combination.
 
@@ -196,11 +228,13 @@ def _parse_gmmexp_configs(cfg) -> list[dict]:
     legend) and "sp" (samples/step).
 
     The label encodes EVERY axis that can vary
-    (``gmmexp_{basis}_{precond}_{i|invS}_{run|batch}[_B{B_M}m{B_m}]``) so that
-    each combination gets its own log file and result key.
+    (``gmmexp_{h|p}{degrees}_{precond}_{i|invS}_{run|batch}[_B{B_M}m{B_m}]``)
+    so that each combination gets its own log file and result key.
     """
     grid = {
-        "basis":    getattr(cfg, "ALGO_GMMEXP_BASIS", "lin"),
+        "family":   getattr(cfg, "ALGO_GMMEXP_FAMILY", "herm"),
+        "basis":    _normalise_gmmexp_bases(
+                        getattr(cfg, "ALGO_GMMEXP_BASIS", (0, 1, 2))),
         "precond":  getattr(cfg, "ALGO_GMMEXP_PRECOND", "gd"),
         "w_type":   getattr(cfg, "ALGO_GMMEXP_W_TYPE", "identity"),
         "m_source": getattr(cfg, "ALGO_GMMEXP_M_SOURCE", "running"),
@@ -213,8 +247,8 @@ def _parse_gmmexp_configs(cfg) -> list[dict]:
     w_tok = {"identity": "i", "inv_var": "invS"}
     m_tok = {"running": "run", "batch": "batch"}
     for c in combos:
-        label = (f"gmmexp_{c['basis']}_{c['precond']}_"
-                 f"{w_tok.get(c['w_type'], c['w_type'])}_"
+        label = (f"gmmexp_{gmmexp_basis_token(c['family'], c['basis'])}_"
+                 f"{c['precond']}_{w_tok.get(c['w_type'], c['w_type'])}_"
                  f"{m_tok.get(c['m_source'], c['m_source'])}")
         if vary_batch:
             label += f"_B{c['B_M']}m{c['B_m']}"
@@ -227,7 +261,7 @@ def _parse_gmmexp_configs(cfg) -> list[dict]:
         dupes = sorted({x for x in labels if labels.count(x) > 1})
         raise ValueError(
             f"Duplicate gmmexp labels {dupes}: every varying axis must appear "
-            f"in the label (basis / precond / w_type / m_source / batches).")
+            f"in the label (family / basis / precond / w_type / m_source / batches).")
     return combos
 
 
@@ -401,10 +435,11 @@ def _save_results(
     elapsed: float,
     algo_names: list[str],
     slim_configs: list[dict],
-    config_file_path: str,
 ):
-    """Save results: config.py (copy), results.npz, summary.txt."""
-    shutil.copy2(config_file_path, os.path.join(outdir, "config.py"))
+    """Save results: results.npz, summary.txt.
+
+    The config snapshot is written at startup (see main()), not here.
+    """
     npz_kwargs = {}
     for algo_name, res in all_results.items():
         for key, arr in res.items():
@@ -504,6 +539,14 @@ def main():
     outdir = cfg.OUTDIR
     if outdir is None:
         outdir = os.path.join("results", datetime.now().strftime("%m%d-%H%M"))
+    # Snapshot the config NOW, before any training starts. A run can take hours
+    # and the config file is typically re-edited in the meantime to launch other
+    # experiments, so copying at the end would record the wrong settings (and a
+    # crash/kill would leave no snapshot at all).
+    os.makedirs(outdir, exist_ok=True)
+    config_snapshot = os.path.join(outdir, "config.py")
+    shutil.copy2(config_path, config_snapshot)
+    print(f"Config snapshot: {config_snapshot}")
     save_plot = cfg.SAVE_PLOT
     # --- Resolve algorithm selection ---
     algo_list = cfg.ALGO_LIST
@@ -906,7 +949,7 @@ def main():
                 )
 
     _save_results(outdir, config, all_results, all_thetas, t_elapsed,
-                  algo_names, slim_configs, config_path)
+                  algo_names, slim_configs)
     print(f"\nResults saved to: {outdir}/")
 
 

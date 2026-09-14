@@ -174,6 +174,37 @@ with $` \boldsymbol{\theta}_* = (\text{amplitude},\, \text{phase},\, \boldsymbol
 In the three DGPs above $` \tau `$ is the confounder coefficient (`DGP_*_C_COEF`, controls both endogeneity strength and the noise floor) and $` \sigma_\varepsilon `$ is the exogenous noise scale (`DGP_*_NOISE_EPS_Y`).
 
 
+### Nonlinear first stage and composite mode names
+
+All the DGPs above use the linear first stage $` \boldsymbol{x} = \gamma_*^\top \boldsymbol{z} + \boldsymbol{c} + \boldsymbol{\varepsilon}_x `$. `DGP_MODE` also accepts **composite names** of the form
+
+```text
+"<structural>-<first_stage>"        e.g. "quadratic-linear", "quadratic-sin", "logistic-tanh"
+```
+
+where the first item is the $` y `$–$` \boldsymbol{x} `$ model and the second is the $` \boldsymbol{x} `$–$` \boldsymbol{z} `$ model:
+
+```math
+\boldsymbol{x} = \phi\!\left( \gamma_*^\top \boldsymbol{z} \right) + \boldsymbol{c} + \boldsymbol{\varepsilon}_x,
+\qquad
+y = g(\boldsymbol{\theta}_*; \boldsymbol{x}) + \frac{\tau}{\sqrt{d_x}} \boldsymbol{1}_{d_x}^\top \boldsymbol{c} + \sigma_\varepsilon \, \varepsilon_y ,
+```
+
+with $` \phi `$ applied elementwise. A plain name is identical to `"<name>-linear"` (so `"quadratic"` $` = `$ `"quadratic-linear"`). The available first stages (`FIRST_STAGE_FUNCS` in `iv_sim/data_generator.py`) are
+
+| `first_stage` | $` \phi(s) `$ | note |
+|---|---|---|
+| `linear` | $` s `$ | default, backward compatible |
+| `quadratic` | $` s^2 `$ | even map: $` \boldsymbol{z} `$ is **linearly** uncorrelated with $` \boldsymbol{x} `$, so linear instruments are weak — a genuine weak-IV regime |
+| `sin` | $` \sin s `$ | oscillatory, non-monotone; with a large `gamma_scale` a low-order sieve cannot span it, making instruments very weak |
+| `tanh` | $` \tanh s `$ | smooth, saturating |
+| `relu` | $` \max(0, s) `$ | kinked |
+| `sigmoid` | $` 1/(1+e^{-s}) `$ | bounded |
+| `cubic` | $` s^3 `$ | heavy tailed — lower `gamma_scale` to keep $` \boldsymbol{x} `$ in range |
+
+Composite modes are available for the structural DGPs `tosg`, `quadratic`, `logistic`, `expiv`, `probit` and `sine`. For `expiv` / `probit` the index auto-normalisation takes the nonlinear first stage into account; setting a composite mode also aligns OTSG's first-stage model with $` \phi `$.
+
+
 
 ## Algorithms
 

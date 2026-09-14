@@ -10,7 +10,12 @@ This file is copied to the results directory for reproducibility.
 # 1. DGP  (data generating process)
 # ============================================================================
 # Modes: "tosg", "otsg", "deepgmm", "quadratic", "logistic", "expiv", "probit", "sine"
-DGP_MODE = "quadratic"
+#        or a composite "<structural>-<first_stage>" name
+#        (first item = y-x model, second item = x-z model), e.g.
+#        "quadratic-linear", "quadratic-sin", "logistic-tanh", "probit-relu".
+#        First stages: linear, quadratic, sin, tanh, relu, sigmoid, cubic.
+#        A plain name is the same as "<structural>-linear".
+DGP_MODE = "quadratic-linear"
 
 # --- tosg ---
 #   z     ~ N(0, I)
@@ -116,7 +121,7 @@ DGP_DEEPGMM_IV_STRENGTH = 1.0    # scales z1 coefficient (IV strength; larger â†
 # ============================================================================
 # 2. Algorithms
 # ============================================================================
-ALGO_LIST = ["gmmexp"]
+ALGO_LIST = ["gmmexp","tosg","otsg"]
 
 # --- TOSG ---
 ALGO_TOSG_LR = 0.01
@@ -188,41 +193,53 @@ ALGO_SIEVE3_AVERAGE = True     # Polyak-Ruppert averaging
 # Any hyperparameter below may be a scalar or a LIST; LISTs are expanded into
 # the full cross-product (one run per combination), so a single
 # ALGO_LIST = ["gmmexp"] entry can run the whole grid.
-# Result labels encode every axis, so each combination has its own log file:
-#   gmmexp_{basis}_{precond}_{i|invS}_{run|batch}[_B{B_M}m{B_m}]
-#   basis    : "lin" (= psi(z)=z, NO sieve) | "herm1" | "herm2" | "herm3" | "poly1" | "poly2"
-#   precond  : "gd" (plain gradient)        | "nt" (Newton-type preconditioning)
-#   w_type   : "identity" (W = I)           | "inv_var" (W = diag(1/(S+lambda)):
-#                                                        divide by S -> adaptive step)
-#   m_source : "running" (op. Jacobian = running average of past batches)
-#              "batch"   (op. Jacobian = the current batch)
+# Result labels encode every axis:
+#   gmmexp_{h|p}{degrees}_{precond}_{i|invS}_{run|batch}[_B{B_M}m{B_m}]
+#   (h = Hermite family, p = polynomial; digits = the included degrees)
+#
+#   family  : "herm" (orthonormal Hermite, degrees 0-3) | "poly" (monomials, 0-2)
+#   basis   : the DEGREE SET of the sieve.  A flat list of ints is ONE basis;
+#             a list of tuples/lists means SEVERAL bases:
+#               [1]            -> psi(z) = z                ("lin")
+#               [1, 2]         -> z, H_2, z_i z_j          (old "herm2")
+#               [0, 1, 2]      -> the above PLUS H_0 = 1    (herm2 + intercept)
+#               [1, 2, 3]      -> adds H_3 terms
+#               [(1,), (1,2), (0,1,2)]  -> three separate runs
+#             NOTE: orthonormal Hermite blocks have E[psi psi^T] = I, and the
+#             constant H_0 is NOT included unless 0 is in the degree set.
+#   precond : "gd" (plain gradient) | "nt" (Newton-type preconditioning)
+#   w_type  : "identity" (W = I)    | "inv_var" (W = diag(1/(S+lambda)):
+#                                              divide by S -> adaptive step)
+#   m_source: "running" (op. Jacobian = running average of past batches)
+#             "batch"   (op. Jacobian = the current batch)
 # NOTE: LR must be paired with w_type -- "identity" needs a small LR, "inv_var"
 # needs a much larger one (W ~ 1/S is small while theta is still far away).
 # Recommended: keep ALGO_GMMEXP_W_TYPE scalar and run the grid once per value.
 # Reproducing the existing algorithms (also set LR / LR_DECAY / AVERAGE):
-#   First-Order SLIM : basis="lin",   precond="gd", w_type="identity",
+#   First-Order SLIM : family="herm", basis=[1],   precond="gd", w_type="identity",
 #                      m_source="batch",   B_M=8, B_m=8, LR=0.01, AVERAGE=False
-#   Sieve3           : basis="herm2", precond="gd", w_type="identity",
+#   Sieve3           : family="herm", basis=[1,2], precond="gd", w_type="identity",
 #                      m_source="batch",   B_M=1, B_m=1, LR=0.01, AVERAGE=True
-#   Sieve1           : basis="poly2", precond="nt", w_type="inv_var",
-#                      m_source="running", B_M=1, B_m=1, LR=0.1,  AVERAGE=False
-ALGO_GMMEXP_BASIS = ["lin", "herm2", "herm3"]
-ALGO_GMMEXP_PRECOND = ["gd", "nt"]
-ALGO_GMMEXP_W_TYPE = ["identity", "inv_var"]    # "identity" | "inv_var"
-ALGO_GMMEXP_M_SOURCE = ["batch", "running"]   # "running" | "batch"
+#   Sieve1           : family="poly", basis=[1,2], precond="nt", w_type="inv_var",
+#                      m_source="running", B_M=1, B_m=1, LR=0.01, AVERAGE=False
+ALGO_GMMEXP_FAMILY = "herm"            # "herm" | "poly"
+ALGO_GMMEXP_BASIS = [(1), (0, 1), (0, 1, 2), (0,1,2,3)]          # one degree set, or [(1,), (1,2), (0,1,2)] for several
+ALGO_GMMEXP_PRECOND = ["nt"]
+ALGO_GMMEXP_W_TYPE = ["identity"]    # "identity" | "inv_var"
+ALGO_GMMEXP_M_SOURCE = ["running"]   # "running" | "batch"
 ALGO_GMMEXP_B_M = 1                # scalar or list
 ALGO_GMMEXP_B_m = 1                # scalar or list
 ALGO_GMMEXP_LR = 0.01              # None -> per-precond default (gd: 1e-3, nt: 0.1)
 ALGO_GMMEXP_LR_DECAY = 0.5
 ALGO_GMMEXP_CLIP = 10.0            # cap on per-step parameter displacement
 ALGO_GMMEXP_REG = 1e-2             # ridge for the weighting / preconditioner
-ALGO_GMMEXP_AVERAGE = True         # Polyak-Ruppert averaging
+ALGO_GMMEXP_AVERAGE = False         # Polyak-Ruppert averaging
 
 # ============================================================================
 # 3. Other
 # ============================================================================
 SEED = 10
-N_ITERATIONS = int(1e6)
+N_ITERATIONS = int(5e6)
 N_REPEATS = 10
 VERBOSE_EVERY = int(1e5)
 HISTORY_EVERY = None          # record training history every N iterations
@@ -231,7 +248,7 @@ OUTDIR = None
 SAVE_PLOT = None
 X_AXIS_SCALE = "log"  # 'linear', 'log', 'symlog', 'asinh', 'logit', 'function', 'functionlog'
 
-N_JOBS = 4                         # parallel algos (> 1 uses multiprocessing)
+N_JOBS = 3                         # parallel algos (> 1 uses multiprocessing)
 EARLY_STOP_THRESHOLD = 0.0         # stop when param error change < this
 EARLY_STOP_PATIENCE = 0            # how many checks before stopping
 

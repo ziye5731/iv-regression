@@ -23,15 +23,28 @@ if TYPE_CHECKING:
 
 
 def _index_std_scale(theta: np.ndarray, gamma_star: np.ndarray,
-                     d_x: int, target_std: float) -> np.ndarray:
+                     d_x: int, target_std: float,
+                     first_stage: str = "linear",
+                     rng: np.random.Generator | None = None) -> np.ndarray:
     """Rescale theta so that Var(theta^T x) == target_std^2.
 
-    Under x = gamma_star^T z + c + eps_x with Var(c) + Var(eps_x) = I one has
-    Var(x) = gamma_star^T gamma_star + I.  Used by the exponential / probit
-    DGPs to keep the linear index -- and therefore exp(.) / Phi(.) -- well
-    scaled regardless of d_x and d_z.
+    Under x = phi(gamma_star^T z) + c + eps_x with Var(c) + Var(eps_x) = I the
+    covariance of x is gamma_star^T gamma_star + I when phi is the identity;
+    for a nonlinear first stage it is estimated by Monte Carlo.  Used by the
+    exponential / probit DGPs to keep the linear index -- and therefore
+    exp(.) / Phi(.) -- well scaled regardless of d_x, d_z and first stage.
     """
-    Sigma_x = gamma_star.T @ gamma_star + np.eye(d_x)
+    if first_stage == "linear":
+        Sigma_x = gamma_star.T @ gamma_star + np.eye(d_x)
+    else:
+        from .data_generator import apply_first_stage
+        rng = rng if rng is not None else np.random.default_rng(0)
+        n = 20000
+        z = rng.normal(0, 1, size=(n, gamma_star.shape[0]))
+        x = (apply_first_stage(z @ gamma_star, first_stage)
+             + rng.normal(0, 1, size=(n, d_x)))
+        x = x - x.mean(axis=0, keepdims=True)
+        Sigma_x = (x.T @ x) / n
     var_idx = float(theta.ravel() @ Sigma_x @ theta.ravel())
     if not np.isfinite(var_idx) or var_idx <= 0.0:
         return theta
@@ -447,7 +460,9 @@ class ExpIVDGP(BaseDGP):
             raw = config.model.true_params(rng, config.d_x)
             config.theta_star = _index_std_scale(
                 raw, config.gamma_star, config.d_x,
-                float(getattr(config, "expiv_index_scale", 1.0)))
+                float(getattr(config, "expiv_index_scale", 0.5)),
+                first_stage=getattr(config, "first_stage", "linear"),
+                rng=rng)
 
     def create_generator(self, config, seed=None):
         from .data_generator import ExponentialDataGenerator
@@ -498,7 +513,9 @@ class ProbitDGP(BaseDGP):
             raw = config.model.true_params(rng, config.d_x)
             config.theta_star = _index_std_scale(
                 raw, config.gamma_star, config.d_x,
-                float(getattr(config, "probit_index_scale", 1.0)))
+                float(getattr(config, "probit_index_scale", 1.0)),
+                first_stage=getattr(config, "first_stage", "linear"),
+                rng=rng)
 
     def create_generator(self, config, seed=None):
         from .data_generator import ProbitDataGenerator
@@ -574,14 +591,84 @@ _DGP_REGISTRY["probit"] = ProbitDGP()
 _DGP_REGISTRY["sine"] = SineDGP()
 
 
+# ============================================================================
+# Composite modes:  "<structural>-<first_stage>"   e.g. "quadratic-sin"
+# ============================================================================
+
+class FirstStageVariant(BaseDGP):
+    """Structural DGP whose first stage x = phi(gamma*^T z) + c + eps_x is
+    nonlinear.
+
+    Created by get_dgp() for composite mode names such as ``quadratic-sin``
+    (structural part ``quadratic``, first stage ``sin``) or
+    ``logistic-tanh``.  The first item of the name is the y-x model, the second
+    is the x-z model.  Everything except configure() is delegated to the
+    wrapped structural DGP.
+    """
+
+    def __init__(self, base: BaseDGP, first_stage: str):
+        self._base = base
+        self.first_stage = first_stage
+        self.dgp_mode = f"{base.dgp_mode}-{first_stage}"
+        self.has_known_model = base.has_known_model
+
+    def __getattr__(self, name):
+        # Delegate everything not defined here (param_error_label,
+        # startup_lines, summary_* overrides, get_h_star, ...) to the wrapped
+        # structural DGP.
+        base = object.__getattribute__(self, "_base")
+        return getattr(base, name)
+
+    def configure(self, config, cfg):
+        self._base.configure(config, cfg)
+        config.first_stage = self.first_stage
+        # keep OTSG's first-stage model aligned with the DGP
+        config.phi_func = self.first_stage
+
+    def setup_model(self, config, rng):
+        self._base.setup_model(config, rng)
+
+    def create_generator(self, config, seed=None):
+        return self._base.create_generator(config, seed=seed)
+
+    def startup_lines(self, config):
+        lines = list(self._base.startup_lines(config))
+        if lines:
+            lines[0] = f"  DGP:        {self.dgp_mode}"
+        lines.append(
+            f"  First stage: x = {self.first_stage}(gamma*^T z) + c + eps_x")
+        return lines
+
+    def summary_dgp_line(self, config):
+        return (f"{self._base.summary_dgp_line(config)} "
+                f"| first_stage={self.first_stage}")
+
+
+# Structural DGPs whose x-z relation can be swapped for a nonlinear one.
+_FIRST_STAGE_STRUCTS = ("tosg", "quadratic", "logistic", "expiv", "probit",
+                        "sine")
+
+
 def get_dgp(mode: str) -> BaseDGP:
     """Look up the DGP descriptor by mode string.
 
+    Plain modes are listed in `_DGP_REGISTRY`.  Composite names of the form
+    "<structural>-<first_stage>" (e.g. "quadratic-sin", "probit-relu") build a
+    copy of the structural DGP with a nonlinear first stage.
+
     Raises ValueError for unknown modes.
     """
-    if mode not in _DGP_REGISTRY:
-        raise ValueError(
-            f"Unknown DGP mode: '{mode}'. "
-            f"Valid modes: {list(_DGP_REGISTRY.keys())}"
-        )
-    return _DGP_REGISTRY[mode]
+    from .data_generator import FIRST_STAGE_FUNCS
+    key = str(mode).lower()
+    if key in _DGP_REGISTRY:
+        return _DGP_REGISTRY[key]
+    if "-" in key:
+        struct, first_stage = key.rsplit("-", 1)
+        if first_stage in FIRST_STAGE_FUNCS and struct in _FIRST_STAGE_STRUCTS:
+            return FirstStageVariant(_DGP_REGISTRY[struct], first_stage)
+    raise ValueError(
+        f"Unknown DGP mode: '{mode}'. Plain modes: {list(_DGP_REGISTRY.keys())}; "
+        f"composite modes '<structural>-<first_stage>' with structural in "
+        f"{list(_FIRST_STAGE_STRUCTS)} and first_stage in "
+        f"{list(FIRST_STAGE_FUNCS)}."
+    )

@@ -910,90 +910,177 @@ class DCOV4(BaseIVAlgorithm):
 # Sieve1  (online preconditioned GMM with a sieve of instrument functions)
 # ---------------------------------------------------------------------------
 
+_INDEX_CACHE: dict = {}          # cached row-major index arrays for the sieve blocks
+
+
+def _upper_pairs(n: int, offset: int = 1) -> tuple:
+    """Row-major (i, j) index arrays with j >= i + offset (cached)."""
+    key = ("triu", n, offset)
+    idx = _INDEX_CACHE.get(key)
+    if idx is None:
+        idx = np.triu_indices(n, offset)
+        _INDEX_CACHE[key] = idx
+    return idx
+
+
+def _offdiag_pairs(n: int) -> tuple:
+    """Row-major (i, j) index arrays with j != i (cached)."""
+    key = ("offdiag", n)
+    idx = _INDEX_CACHE.get(key)
+    if idx is None:
+        ii, jj = np.meshgrid(np.arange(n), np.arange(n), indexing="ij")
+        mask = ii != jj
+        idx = (ii[mask], jj[mask])
+        _INDEX_CACHE[key] = idx
+    return idx
+
+
+def _normalise_degrees(degrees) -> tuple:
+    """Normalise a degree spec (int, or list/tuple of ints) to a sorted tuple."""
+    if isinstance(degrees, (int, np.integer)):
+        degrees = [int(degrees)]
+    try:
+        out = tuple(sorted({int(d) for d in degrees}))
+    except TypeError as exc:
+        raise ValueError(f"Bad degree spec {degrees!r}") from exc
+    if not out:
+        raise ValueError("Empty degree set")
+    return out
+
+
+def _poly_dim(d_z: int, degree: int) -> int:
+    """Number of monomials of exactly `degree` in d_z variables."""
+    if degree == 0:
+        return 1
+    if degree == 1:
+        return d_z
+    if degree == 2:
+        return d_z * (d_z + 1) // 2
+    raise ValueError(
+        f"polynomial sieve only supports degrees 0, 1 and 2, got {degree}")
+
+
+def _poly_block(z: np.ndarray, degree: int) -> np.ndarray:
+    """One monomial block of exactly `degree` (0, 1 or 2).
+
+    Built with whole-array operations; the column order matches the obvious
+    nested loops (row-major over i <= j).
+    """
+    d_z = z.shape[1]
+    if degree == 0:
+        return np.ones((z.shape[0], 1))
+    if degree == 1:
+        return z
+    if degree == 2:
+        outer = z[:, :, None] * z[:, None, :]          # (B, d_z, d_z)
+        iu, ju = _upper_pairs(d_z, 0)
+        return outer[:, iu, ju]
+    raise ValueError(
+        f"polynomial sieve only supports degrees 0, 1 and 2, got {degree}")
+
+
+def _poly_degrees_features(z: np.ndarray, degrees) -> np.ndarray:
+    """Monomial sieve over an explicit set of degrees (each 0, 1 or 2)."""
+    degrees = _normalise_degrees(degrees)
+    return np.concatenate([_poly_block(z, int(d)) for d in degrees], axis=1)
+
+
 def _sieve_poly_features(
     z: np.ndarray, degree: int, include_intercept: bool = False
 ) -> np.ndarray:
-    """Polynomial sieve features of z up to `degree`.
+    """Polynomial sieve features of z with degrees 1..`degree` (1 or 2).
 
-    degree = 1 -> [z_1, ..., z_dz]
-    degree = 2 -> degree-1 features + [z_i z_j for i <= j]
-
-    Only degree 1 and 2 are implemented (degree 3 is available through the
-    orthonormal Hermite basis, "herm3").  If include_intercept is True, a
-    constant column of ones is prepended.
+    If include_intercept is True a constant column (degree 0) is prepended.
+    Kept for backwards compatibility; see `_poly_degrees_features` for the
+    flexible degree-set version used by `GMMExp`.
 
     Returns (B, p).
     """
-    if degree not in (1, 2):
-        raise ValueError(
-            f"_sieve_poly_features supports degree 1 or 2, got {degree}")
+    degrees = ([0] if include_intercept else []) + list(range(1, int(degree) + 1))
+    return _poly_degrees_features(z, degrees)
+
+
+def _hermite_dim(d_z: int, degree: int) -> int:
+    """Number of orthonormal Hermite functions of exactly `degree` in d_z vars."""
+    if degree == 0:
+        return 1
+    if degree == 1:
+        return d_z
+    if degree == 2:
+        return d_z + d_z * (d_z - 1) // 2
+    if degree == 3:
+        return d_z + d_z * (d_z - 1) + d_z * (d_z - 1) * (d_z - 2) // 6
+    raise ValueError(f"Hermite sieve only supports degrees 0-3, got {degree}")
+
+
+def _hermite_block(z: np.ndarray, degree: int) -> np.ndarray:
+    """One orthonormal (probabilists') Hermite block of exactly `degree`.
+
+        degree 0: H_0 = 1
+        degree 1: H_1(z_i) = z_i
+        degree 2: H_2(z_i) = (z_i^2 - 1)/sqrt(2),
+                  H_1(z_i) H_1(z_j) = z_i z_j              (i < j)
+        degree 3: H_3(z_i) = (z_i^3 - 3 z_i)/sqrt(6),
+                  H_2(z_i) H_1(z_j)                        (i != j),
+                  H_1(z_i) H_1(z_j) H_1(z_k) = z_i z_j z_k (i < j < k)
+
+    Built with whole-array operations (cached index arrays); the column order
+    matches the obvious nested loops.
+    """
     d_z = z.shape[1]
-    feats = []
-    if include_intercept:
-        feats.append(np.ones((z.shape[0], 1)))
-    feats.append(z)
-    if degree >= 2:
-        cols = []
-        for i in range(d_z):
-            for j in range(i, d_z):
-                cols.append((z[:, i] * z[:, j]).reshape(-1, 1))
-        feats.append(np.concatenate(cols, axis=1))
-    return np.concatenate(feats, axis=1)
+    if degree == 0:
+        return np.ones((z.shape[0], 1))
+    if degree == 1:
+        return z
+    if degree == 2:
+        h2 = (z ** 2 - 1.0) / np.sqrt(2.0)                 # (B, d_z)
+        outer = z[:, :, None] * z[:, None, :]              # (B, d_z, d_z)
+        iu, ju = _upper_pairs(d_z, 1)
+        return np.concatenate([h2, outer[:, iu, ju]], axis=1)
+    if degree == 3:
+        h3 = (z ** 3 - 3.0 * z) / np.sqrt(6.0)             # (B, d_z)
+        h2 = (z ** 2 - 1.0) / np.sqrt(2.0)                 # (B, d_z)
+        cross23 = h2[:, :, None] * z[:, None, :]           # (B, d_z, d_z) [i, j]
+        ii, jj = _offdiag_pairs(d_z)
+        blocks = [h3, cross23[:, ii, jj]]                  # H3, then H2*H1
+        # z_i z_j z_k with i < j < k, in i-major then (j, k) row-major order
+        for i in range(d_z - 2):
+            sub = z[:, i + 1:]
+            outer = sub[:, :, None] * sub[:, None, :]
+            su, sv = _upper_pairs(sub.shape[1], 1)
+            blocks.append(z[:, i:i + 1] * outer[:, su, sv])
+        return np.concatenate(blocks, axis=1)
+    raise ValueError(f"Hermite sieve only supports degrees 0-3, got {degree}")
+
+
+def _hermite_degrees_features(z: np.ndarray, degrees) -> np.ndarray:
+    """Tensor-product orthonormal Hermite sieve over an explicit degree set.
+
+    All blocks are orthonormal and mutually orthogonal, so E[psi psi^T] = I.
+    """
+    degrees = _normalise_degrees(degrees)
+    return np.concatenate([_hermite_block(z, int(d)) for d in degrees], axis=1)
 
 
 def _sieve_hermite_features(
     z: np.ndarray, degree: int, include_intercept: bool = False
 ) -> np.ndarray:
-    """Orthonormal (probabilists') Hermite sieve features of z, z ~ N(0, I).
+    """Orthonormal Hermite sieve with degrees 1..`degree` (1, 2 or 3).
 
-    Tensor-product basis up to `degree` (supports degree 1, 2 and 3):
-
-        degree 1: H_1(z_i) = z_i
-        degree 2: H_2(z_i) = (z_i^2 - 1)/sqrt(2), and
-                  H_1(z_i) H_1(z_j) = z_i z_j  (i < j)
-        degree 3: H_3(z_i) = (z_i^3 - 3 z_i)/sqrt(6),
-                  H_2(z_i) H_1(z_j)  (i != j), and
-                  H_1(z_i) H_1(z_j) H_1(z_k) = z_i z_j z_k  (i < j < k)
-
-    All blocks are orthonormal and mutually orthogonal, i.e.
-    E[psi psi^T] = I.  If include_intercept is True, a constant column of ones
-    is prepended (the constant H_0 = 1 is normally excluded).
+    `include_intercept=True` prepends the constant H_0 = 1.  Kept for
+    backwards compatibility; `GMMExp` uses `_hermite_degrees_features`, which
+    takes an explicit degree set.
 
     Returns (B, p).
     """
-    d_z = z.shape[1]
-    feats = []
-    if include_intercept:
-        feats.append(np.ones((z.shape[0], 1)))
-    feats.append(z)
-    if degree >= 2:
-        cols = []
-        for i in range(d_z):
-            cols.append(((z[:, i] ** 2 - 1.0) / np.sqrt(2.0)).reshape(-1, 1))
-        for i in range(d_z):
-            for j in range(i + 1, d_z):
-                cols.append((z[:, i] * z[:, j]).reshape(-1, 1))
-        feats.append(np.concatenate(cols, axis=1))
-    if degree >= 3:
-        cols = []
-        # H_3(z_i) = (z_i^3 - 3 z_i)/sqrt(6)
-        for i in range(d_z):
-            cols.append(((z[:, i] ** 3 - 3.0 * z[:, i])
-                         / np.sqrt(6.0)).reshape(-1, 1))
-        # H_2(z_i) * H_1(z_j),  i != j
-        for i in range(d_z):
-            h2 = (z[:, i] ** 2 - 1.0) / np.sqrt(2.0)
-            for j in range(d_z):
-                if j == i:
-                    continue
-                cols.append((h2 * z[:, j]).reshape(-1, 1))
-        # z_i z_j z_k,  i < j < k
-        for i in range(d_z):
-            for j in range(i + 1, d_z):
-                for k in range(j + 1, d_z):
-                    cols.append((z[:, i] * z[:, j] * z[:, k]).reshape(-1, 1))
-        feats.append(np.concatenate(cols, axis=1))
-    return np.concatenate(feats, axis=1)
+    degrees = ([0] if include_intercept else []) + list(range(1, int(degree) + 1))
+    return _hermite_degrees_features(z, degrees)
+
+
+def gmmexp_basis_token(family: str, degrees) -> str:
+    """Compact basis tag for result labels, e.g. ("herm", (0,1,2)) -> 'h012'."""
+    tag = "h" if family == "herm" else "p"
+    return tag + "".join(str(int(d)) for d in _normalise_degrees(degrees))
 
 
 class Sieve1(BaseIVAlgorithm):
@@ -1562,9 +1649,13 @@ class GMMExp(BaseIVAlgorithm):
     estimators used for ablation studies.  Three factors vary, and everything
     else is held fixed so the factors are isolated:
 
-      basis      : "lin"   -> psi(z) = z                  (no sieve)
-                   "herm1"/"herm2"/"herm3" -> orthonormal Hermite sieve,
-                   "poly1"/"poly2" -> polynomial sieve
+      basis      : the *degree set* of the instrument sieve, e.g.
+                     (1,)       -> psi(z) = z              (="lin")
+                     (1, 2)     -> z, H_2, z_i z_j         (old "herm2")
+                     (0, 1, 2)  -> the above + H_0 = 1      (herm2 with intercept)
+                   family="poly" uses monomials instead of Hermite functions
+                   (only degrees 0, 1, 2); family="herm" supports degrees 0-3.
+      family     : "herm" (orthonormal Hermite) | "poly" (monomial sieve)
       precond    : "gd"    -> direction = M_op^T W m_t     (plain gradient)
                    "nt"    -> direction = (M_op^T W M_op + lam I)^{-1}
                                           M_op^T W m_t    (Newton-type)
@@ -1585,53 +1676,48 @@ class GMMExp(BaseIVAlgorithm):
       * one step draws ``B_M + B_m`` fresh samples, split into a Jacobian batch
         (``B_M``) and a moment batch (``B_m``), so every variant consumes the
         same number of samples per step (see ``samples_per_step``);
-      * ``Mbar`` (p x d) and ``Om_bar`` (p x p, ``E[psi psi^T eps^2]``) are
-        running averages of *past* batches only and are updated *after* the
-        parameter step, so the update direction is ``F_{t-1}``-measurable and
-        (conditionally) unbiased;
+      * ``Mbar`` (p x d) and the diagonal of ``Om_bar`` = ``E[psi_i^2 eps^2]``
+        (p,) are running averages of *past* batches only and are updated
+        *after* the parameter step, so the update direction is
+        ``F_{t-1}``-measurable and (conditionally) unbiased;
       * ``gd`` and ``nt`` reuse the very same ``M_op`` and ``W``; the only
         difference between them is the Newton matrix inverse;
       * ``W`` is used exactly as computed - no rescaling - so its magnitude
         (which carries the adaptive step size in ``inv_var``) is preserved;
       * Polyak-Ruppert averaging is switchable (``average``).
 
-    Any of basis / precond / w_type / m_source / B_M / B_m may be set to a LIST
-    in the config (``ALGO_GMMEXP_*``); the runner then enumerates the full
-    cross-product, so a single ``ALGO_LIST = ["gmmexp"]`` entry expands into one
-    run per combination (result labels:
-    ``gmmexp_{basis}_{precond}_{i|invS}_{run|batch}``).
+    Any of family / basis / precond / w_type / m_source / B_M / B_m may be set
+    to a LIST in the config (``ALGO_GMMEXP_*``); the runner then enumerates the
+    full cross-product, so a single ``ALGO_LIST = ["gmmexp"]`` entry expands into
+    one run per combination (result labels:
+    ``gmmexp_{h|p}{degrees}_{precond}_{i|invS}_{run|batch}``).
+    For ``basis`` a flat list of ints means ONE degree set, while a list of
+    tuples/lists means SEVERAL, e.g. ``[1, 2]`` -> one basis (1,2) whereas
+    ``[(1,), (1, 2), (0, 1, 2)]`` -> three runs.
 
     Reproduction of the existing algorithms (also set lr and average):
-      First-Order SLIM : basis="lin",   precond="gd", w_type="identity",
+      First-Order SLIM : family="herm", basis=[1],   precond="gd", w_type="identity",
                          m_source="batch",   B_M=B_m=8, average=False
-      Sieve3           : basis="herm2", precond="gd", w_type="identity",
+      Sieve3           : family="herm", basis=[1, 2], precond="gd", w_type="identity",
                          m_source="batch",   B_M=B_m=1, average=True
-      Sieve1           : basis="poly2", precond="nt", w_type="inv_var",
+      Sieve1           : family="poly", basis=[1, 2], precond="nt", w_type="inv_var",
                          m_source="running", B_M=B_m=1, average=False
     """
 
     # --- factor defaults (overridden by kwargs / ALGO_GMMEXP_* config) ---
-    basis: str = "lin"
+    family: str = "herm"          # "herm" (orthonormal) | "poly" (monomials)
+    basis: tuple = (0, 1, 2)      # degree set: (1,) = z, (0,1,2) = herm2 + intercept
     precond: str = "gd"
     w_type: str = "identity"
     m_source: str = "running"
-
-    # encoded basis -> (feature kind, sieve degree)
-    _BASIS_MAP = {
-        "lin":   ("lin", 1),
-        "herm1": ("herm", 1),
-        "herm2": ("herm", 2),
-        "herm3": ("herm", 3),
-        "poly1": ("poly", 1),
-        "poly2": ("poly", 2),
-    }
 
     def __init__(
         self,
         config: SimulationConfig,
         model: BaseModel | None = None,
         seed: int | None = None,
-        basis: str | None = None,
+        family: str | None = None,
+        basis=None,
         precond: str | None = None,
         w_type: str | None = None,
         m_source: str | None = None,
@@ -1645,18 +1731,24 @@ class GMMExp(BaseIVAlgorithm):
     ):
         super().__init__(config, model, seed, init_theta=init_theta,
                          start_iter=start_iter)
-        self.basis = basis if basis is not None else getattr(
+        self.family = family if family is not None else getattr(
+            config, "gmmexp_family", self.family)
+        raw_basis = basis if basis is not None else getattr(
             config, "gmmexp_basis", self.basis)
+        self.basis = _normalise_degrees(raw_basis)
         self.precond = precond if precond is not None else getattr(
             config, "gmmexp_precond", self.precond)
         self.w_type = w_type if w_type is not None else getattr(
             config, "gmmexp_w_type", self.w_type)
         self.m_source = m_source if m_source is not None else getattr(
             config, "gmmexp_m_source", self.m_source)
-        if self.basis not in self._BASIS_MAP:
-            raise ValueError(f"Unknown basis '{self.basis}'; "
-                             f"valid: {sorted(self._BASIS_MAP)}")
-        self.basis_kind, self.degree = self._BASIS_MAP[self.basis]
+        if self.family not in ("herm", "poly"):
+            raise ValueError(f"Unknown basis family '{self.family}' "
+                             f"(use 'herm' or 'poly')")
+        max_deg = 3 if self.family == "herm" else 2
+        if max(self.basis) > max_deg:
+            raise ValueError(f"A '{self.family}' basis supports degrees up to "
+                             f"{max_deg}, got {self.basis}")
         self.B_M = B_M if B_M is not None else getattr(config, "gmmexp_B_M", 1)
         self.B_m = B_m if B_m is not None else getattr(config, "gmmexp_B_m", 1)
         self.clip = clip if clip is not None else getattr(
@@ -1679,7 +1771,8 @@ class GMMExp(BaseIVAlgorithm):
 
         self._p = self._feature_dim(config.d_z)
         self._M_bar = np.zeros((self._p, config.d_theta))
-        self._Om_bar = np.zeros((self._p, self._p))
+        # only the diagonal of E[psi psi^T eps^2] is ever needed (inv_var W)
+        self._s_bar = np.zeros(self._p)
         self.theta_bar = self.theta.copy()   # Polyak-Ruppert average
         self._avg_count = 0
         self._warned_rank = False
@@ -1689,39 +1782,34 @@ class GMMExp(BaseIVAlgorithm):
     # ------------------------------------------------------------------
 
     def _feature_dim(self, d_z: int) -> int:
-        if self.basis_kind == "lin" or self.degree == 1:
-            return d_z
-        if self.basis_kind == "herm":
-            p = d_z + d_z + d_z * (d_z - 1) // 2          # H_1 + H_2 + cross
-            if self.degree >= 3:
-                p += d_z + d_z * (d_z - 1)                # H_3 + H_2*H_1
-                p += d_z * (d_z - 1) * (d_z - 2) // 6     # triple products
-            return p
-        return d_z + d_z * (d_z + 1) // 2             # linear + quadratics
+        if self.family == "herm":
+            return sum(_hermite_dim(d_z, int(d)) for d in self.basis)
+        return sum(_poly_dim(d_z, int(d)) for d in self.basis)
 
     def _features(self, z: np.ndarray) -> np.ndarray:
-        if self.basis_kind == "lin" or self.degree == 1:
-            return z                                  # no sieve: psi(z) = z
-        if self.basis_kind == "herm":
-            return _sieve_hermite_features(z, self.degree,
-                                           include_intercept=False)
-        return _sieve_poly_features(z, self.degree, include_intercept=False)
+        if self.family == "herm":
+            return _hermite_degrees_features(z, self.basis)
+        return _poly_degrees_features(z, self.basis)
 
-    def _weight_matrix(self) -> np.ndarray:
-        """W built from PAST running statistics only (measurable w.r.t. F_{t-1}).
+    def _weight_vector(self) -> np.ndarray:
+        """Diagonal of W, from PAST running statistics only (F_{t-1}-measurable).
 
-        "identity": W = I - no weighting (reproduces SLIM / Sieve3).
-        "inv_var" : W = diag(1 / (diag(Om_bar) + lam)) - Sieve1's weighting.
-                    Its magnitude is deliberately NOT rescaled: dividing the
+        "identity": ones (i.e. W = I; reproduces SLIM / Sieve3).
+        "inv_var" : 1 / (diag(Om_bar) + lam) - Sieve1's weighting.  Its
+                    magnitude is deliberately NOT rescaled: dividing the
                     direction by the moment variance is what turns W into an
                     adaptive step-size normaliser (W ~ 1/E[eps^2]).
+
+        Returning the diagonal lets the caller use ``M^T diag(w)`` instead of
+        forming the dense p x p matrix; the two are identical.
         """
         if self.w_type == "identity":
-            return np.eye(self._p)
-        return np.diag(1.0 / (np.diag(self._Om_bar) + self.reg))
+            return np.ones(self._p)
+        return 1.0 / (self._s_bar + self.reg)
 
     def _tag(self) -> str:
-        return f"gmmexp {self.basis}/{self.precond}/{self.w_type}/{self.m_source}"
+        return (f"gmmexp {gmmexp_basis_token(self.family, self.basis)}/"
+                f"{self.precond}/{self.w_type}/{self.m_source}")
 
     # ------------------------------------------------------------------
     # BaseIVAlgorithm interface
@@ -1753,17 +1841,18 @@ class GMMExp(BaseIVAlgorithm):
         """GMMExp single-step update (B_M + B_m fresh samples)."""
         B_M, B_m = self.B_M, self.B_m
         z_all, x_all, y_all = generator.generate_batch(B_M + B_m)
-        z_M, x_M = z_all[:B_M], x_all[:B_M]
-        z_m, x_m, y_m = z_all[B_M:], x_all[B_M:], y_all[B_M:]
+        x_M, x_m, y_m = x_all[:B_M], x_all[B_M:], y_all[B_M:]
+
+        # one feature call for the whole batch, then split (same columns)
+        psi_all = self._features(z_all)
+        psi_M, psi_m = psi_all[:B_M], psi_all[B_M:]
 
         # Jacobian batch: used to update the running Mbar, and directly as the
         # operator when m_source == "batch" (SLIM / Sieve3).
-        psi_M = self._features(z_M)
         grad_M = self.model.gradient(self.theta, x_M)
         J_batch = (psi_M.T @ grad_M) / B_M                # (p, d)
 
         # Moment batch
-        psi_m = self._features(z_m)
         err_m = self.model.predict(self.theta, x_m) - y_m  # (B_m, 1)
         m_t = (psi_m.T @ err_m) / B_m                      # (p, 1)
 
@@ -1772,8 +1861,12 @@ class GMMExp(BaseIVAlgorithm):
         # M_op is the running past average by default, or the current batch
         # when m_source == "batch" (SLIM / Sieve3).
         M_op = J_batch if self.m_source == "batch" else self._M_bar
-        W = self._weight_matrix()                          # (p, p)
-        MtW = M_op.T @ W                                   # (d, p)
+        # M^T W with W = diag(w) (no dense p x p matrix is formed)
+        if self.w_type == "identity":
+            MtW = M_op.T                                   # (d, p)
+        else:
+            w = self._weight_vector()                      # (p,)
+            MtW = (M_op * w[:, None]).T                    # (d, p)
 
         if self.precond == "nt":
             MtWM = MtW @ M_op                              # (d, d)
@@ -1803,8 +1896,9 @@ class GMMExp(BaseIVAlgorithm):
         # Running statistics from past batches only (update AFTER the step)
         beta = 1.0 / max(1, self.t)
         self._M_bar = (1.0 - beta) * self._M_bar + beta * J_batch
-        outer = (psi_m * err_m).T @ (psi_m * err_m) / B_m   # E[psi psi^T eps^2]
-        self._Om_bar = (1.0 - beta) * self._Om_bar + beta * outer
+        if self.w_type != "identity":   # Omega is unused when W = I
+            s_batch = (psi_m ** 2 * err_m ** 2).mean(axis=0)   # diag of Omega
+            self._s_bar = (1.0 - beta) * self._s_bar + beta * s_batch
 
         # Polyak-Ruppert averaging of the iterates
         if self.average:
