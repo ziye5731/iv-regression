@@ -255,7 +255,6 @@ And the average over all past updates is also recorded:
 
 The final estimator is given by the overall average $` \bar{\boldsymbol{\theta}}_{N} `$, where $` N `$ is the total number of iterations.
 
-
 In the streaming setting ($`B_M = B_m = 1 `$), the update is calculated by
 
 ```math
@@ -591,3 +590,94 @@ The average over all past updates is recorded:
 ```
 
 The final estimator is given by the overall average $` \bar{\boldsymbol{\theta}}_{N} `$, where $` N `$ is the total number of iterations.
+
+#### SSGMM (implemented as `SSGMM` in `iv_sim/algorithms.py`)
+
+SSGMM is the fixed specification selected from the `gmmexp` ablations. It
+keeps the Hermite-sieve construction and the past-statistics idea of Sieve1,
+but fixes all design choices except the degrees included in the Hermite basis:
+
+- basis family: orthonormal probabilists' Hermite functions;
+- preconditioner: Newton-type;
+- moment weight: $`W=I`$;
+- Jacobian operator: running average of historical Jacobian batches;
+- output: the raw final iterate, without Polyak--Ruppert averaging.
+
+For a selected degree set $`D\subseteq\{0,1,2,3\}`$, write the sieve as
+$`\psi_D(\boldsymbol z)`$. Degree 0 is the intercept, degree 1 contains
+$`z_i`$, degree 2 contains $`(z_i^2-1)/\sqrt{2}`$ and $`z_i z_j`$ for
+$`i<j`$, and degree 3 contains the corresponding orthonormal cubic Hermite
+terms. Hence, for Gaussian instruments,
+$`\mathbb E[\psi_D(\boldsymbol z)\psi_D(\boldsymbol z)^\top]=I`$.
+
+At iteration $`t`$, SSGMM draws independent *ordinary stream* batches—not
+conditional draws sharing an instrument. With the default $`B_M=B_m=1`$, the
+moment observation produces
+
+```math
+m_t(\boldsymbol\theta_{t-1})
+=
+\psi_D(\boldsymbol z_t^{(m)})
+\left[g(\boldsymbol\theta_{t-1};\boldsymbol x_t^{(m)})-y_t^{(m)}\right],
+```
+
+while the Jacobian observation produces
+
+```math
+J_t(\boldsymbol\theta_{t-1})
+=
+\psi_D(\boldsymbol z_t^{(M)})
+\nabla_\theta g(\boldsymbol\theta_{t-1};\boldsymbol x_t^{(M)})^\top.
+```
+
+The parameter update uses only the historical Jacobian average
+$`\bar M_{t-1}`$:
+
+```math
+A_{t-1}
+=
+\left(\bar M_{t-1}^\top\bar M_{t-1}+\lambda I\right)^{-1}
+\bar M_{t-1}^\top,
+\qquad
+\boldsymbol\theta_t
+=
+\boldsymbol\theta_{t-1}-\alpha_t A_{t-1}m_t(\boldsymbol\theta_{t-1}),
+```
+
+followed by the running-statistic update
+
+```math
+\bar M_t
+=
+\left(1-\frac1t\right)\bar M_{t-1}+\frac1tJ_t(\boldsymbol\theta_{t-1}).
+```
+
+Thus $`A_{t-1}`$ is measurable with respect to past samples and is independent
+of the current moment sample. The first step initializes $`\bar M_1`$ (its
+parameter direction is zero because $`\bar M_0=0`$). For larger batch sizes,
+the implementation replaces $`m_t`$ and $`J_t`$ by their respective batch
+averages.
+
+To run SSGMM, set `ALGO_LIST = ["ssgmm"]`. `ALGO_SSGMM_BASIS` is the only
+SSGMM *grid* setting: a flat degree list denotes one basis, while a list of
+tuples/lists runs one experiment per basis. The usual scalar hyperparameters
+remain independently configurable:
+
+```python
+ALGO_SSGMM_BASIS = [0, 1, 2]                 # one SSGMM run
+ALGO_SSGMM_BASIS = [(1,), (0, 1), (0, 1, 2)] # three SSGMM runs
+ALGO_SSGMM_LR = 0.01
+ALGO_SSGMM_LR_DECAY = 0.5
+ALGO_SSGMM_B_M = 1
+ALGO_SSGMM_B_m = 1
+ALGO_SSGMM_REG = 1e-2
+ALGO_SSGMM_CLIP = 10.0
+```
+
+Their defaults recover the selected ablation setting:
+$`\alpha_t=0.01\,t^{-0.5}`$, $`B_M=B_m=1`$, $`\lambda=10^{-2}`$, and an
+unscaled-direction cap of 10.
+
+The resulting keys are `ssgmm_h…` (for example, `ssgmm_h012`). SSGMM curves
+use green shades; when several basis sets are run together, each set receives
+a distinct green.

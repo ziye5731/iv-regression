@@ -33,6 +33,7 @@ COLORS = {
     "sieve1": "#088122",
     "sieve2": "#B5FF35",
     "sieve3": "#00B0FF",     # light blue
+    "ssgmm": "#238B45",      # green (fixed-setting Hermite sieve GMM)
     # SLIM default fallback
     "slim": "#2979FF",       # bright blue
     "first_order_slim": "#2979FF",
@@ -66,11 +67,18 @@ LABELS = {
     "sieve1": "Sieve1",
     "sieve2": "Sieve2",
     "sieve3": "Sieve3",
+    "ssgmm": "SSGMM",
 }
 
 # Ablation palette for the gmmexp cross-product runs
 _GMMEXP_PALETTE = [plt.get_cmap("tab20")(i / 20.0) for i in range(18)]
 _gmmexp_variant_counter: dict[str, int] = {}
+
+# Green shades for SSGMM Hermite-degree variants.
+_SSGMM_PALETTE = [
+    "#006D2C", "#238B45", "#41AB5D", "#74C476", "#A1D99B", "#C7E9C0",
+]
+_ssgmm_variant_counter: dict[str, int] = {}
 
 FIG_SIZE = (10, 5)
 DPI = 120
@@ -112,6 +120,16 @@ def _get_color_and_label(algo_name: str) -> tuple[str, str]:
         suffix = key[len("gmmexp"):].strip("_")
         label = f"GMMEXP({suffix.replace('_', ',')})" if suffix else "GMMEXP"
         return _GMMEXP_PALETTE[idx % len(_GMMEXP_PALETTE)], label
+    # ssgmm_h012: fixed SSGMM with Hermite degrees (0, 1, 2).
+    if key.startswith("ssgmm"):
+        if key == "ssgmm":
+            return COLORS["ssgmm"], LABELS["ssgmm"]
+        if key not in _ssgmm_variant_counter:
+            _ssgmm_variant_counter[key] = len(_ssgmm_variant_counter)
+        idx = _ssgmm_variant_counter[key]
+        suffix = key[len("ssgmm"):].strip("_")
+        label = f"SSGMM({suffix})" if suffix else "SSGMM"
+        return _SSGMM_PALETTE[idx % len(_SSGMM_PALETTE)], label
     return "#333333", algo_name
 
 

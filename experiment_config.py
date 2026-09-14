@@ -121,7 +121,7 @@ DGP_DEEPGMM_IV_STRENGTH = 1.0    # scales z1 coefficient (IV strength; larger â†
 # ============================================================================
 # 2. Algorithms
 # ============================================================================
-ALGO_LIST = ["gmmexp","tosg","otsg"]
+ALGO_LIST = ["ssgmm", "tosg", "otsg"]
 
 # --- TOSG ---
 ALGO_TOSG_LR = 0.01
@@ -235,6 +235,21 @@ ALGO_GMMEXP_CLIP = 10.0            # cap on per-step parameter displacement
 ALGO_GMMEXP_REG = 1e-2             # ridge for the weighting / preconditioner
 ALGO_GMMEXP_AVERAGE = False         # Polyak-Ruppert averaging
 
+# --- SSGMM (fixed-setting Hermite sieve GMM) ---
+# SSGMM fixes the best-performing GMMExp design choices:
+#   family="herm", precond="nt", W=I, M_source="running", average=False,
+# while retaining ordinary numerical hyperparameters below. The degree set is
+# the only configurable SSGMM *grid* axis. A flat list denotes one basis; a
+# list of tuples/lists launches one SSGMM run per basis, e.g.
+# [(1,), (0,1), (0,1,2), (0,1,2,3)]. Degree 0 is the intercept.
+ALGO_SSGMM_BASIS = [(1,), (0, 1), (0, 1, 2), (0, 1, 2, 3)]
+ALGO_SSGMM_LR = 0.01
+ALGO_SSGMM_LR_DECAY = 0.5
+ALGO_SSGMM_B_M = 1
+ALGO_SSGMM_B_m = 1
+ALGO_SSGMM_REG = 1e-2
+ALGO_SSGMM_CLIP = 10.0
+
 # ============================================================================
 # 3. Other
 # ============================================================================
@@ -251,4 +266,3 @@ X_AXIS_SCALE = "log"  # 'linear', 'log', 'symlog', 'asinh', 'logit', 'function',
 N_JOBS = 3                         # parallel algos (> 1 uses multiprocessing)
 EARLY_STOP_THRESHOLD = 0.0         # stop when param error change < this
 EARLY_STOP_PATIENCE = 0            # how many checks before stopping
-

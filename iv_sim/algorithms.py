@@ -1909,6 +1909,92 @@ class GMMExp(BaseIVAlgorithm):
         return theta_new, loss
 
 
+class SSGMM(GMMExp):
+    """SSGMM: fixed-setting online Hermite sieve GMM.
+
+    SSGMM is the selected configuration from the ``GMMExp`` ablations. It
+    estimates finite Hermite-sieve moments using ordinary stream batches: a
+    fresh moment batch drives the current update and a separate Jacobian batch
+    updates the statistic for subsequent iterations. It therefore needs
+    neither a two-sample oracle nor a first-stage / nuisance-model estimate.
+
+    The Hermite degree set is deliberately the *only* exposed algorithmic
+    choice. All structural choices are fixed: Newton-type preconditioning,
+    identity moment weighting, a running past-Jacobian operator, and raw
+    iterates (no averaging). Standard scalar hyperparameters, including the
+    learning-rate schedule and batch sizes, remain configurable.
+
+    With ``Mbar_{t-1}`` denoting the historical Jacobian average and
+    ``m_t = psi(z_t) [g(theta_t; x_t)-y_t]``, the direction is
+
+        (Mbar^T Mbar + lambda I)^(-1) Mbar^T m_t.
+
+    The parent implementation updates ``Mbar`` only after evaluating this
+    direction, keeping the operator independent of the current moment.
+    """
+
+    def __init__(
+        self,
+        config: SimulationConfig,
+        model: BaseModel | None = None,
+        seed: int | None = None,
+        basis=None,
+        lr: float | None = None,
+        lr_decay: float | None = None,
+        B_M: int | None = None,
+        B_m: int | None = None,
+        reg: float | None = None,
+        clip: float | None = None,
+        init_theta: np.ndarray | None = None,
+        start_iter: int = 0,
+    ):
+        """Create SSGMM with a chosen Hermite degree set.
+
+        Args:
+            basis: Hermite degrees to include, e.g. ``(1, 2)``. When omitted,
+                uses ``config.ssgmm_basis``. Degrees 0--3 are supported;
+                degree 0 is the intercept.
+            lr, lr_decay: learning-rate schedule parameters.
+            B_M, B_m: historical-Jacobian and current-moment batch sizes.
+            reg: ridge coefficient in the Newton-type preconditioner.
+            clip: maximum norm of the unscaled update direction.
+        """
+        self.lr = lr if lr is not None else getattr(config, "ssgmm_lr", 0.01)
+        self.lr_decay = (lr_decay if lr_decay is not None else getattr(
+            config, "ssgmm_lr_decay", 0.5))
+        B_M = B_M if B_M is not None else getattr(config, "ssgmm_B_M", 1)
+        B_m = B_m if B_m is not None else getattr(config, "ssgmm_B_m", 1)
+        reg = reg if reg is not None else getattr(config, "ssgmm_reg", 1e-2)
+        clip = clip if clip is not None else getattr(config, "ssgmm_clip", 10.0)
+        super().__init__(
+            config,
+            model=model,
+            seed=seed,
+            family="herm",
+            basis=(basis if basis is not None else getattr(
+                config, "ssgmm_basis", (0, 1, 2))),
+            precond="nt",
+            w_type="identity",
+            m_source="running",
+            B_M=B_M,
+            B_m=B_m,
+            clip=clip,
+            reg=reg,
+            average=False,
+            init_theta=init_theta,
+            start_iter=start_iter,
+        )
+
+    def _tag(self) -> str:
+        return f"ssgmm {gmmexp_basis_token(self.family, self.basis)}"
+
+    def _get_lr0(self) -> float:
+        return float(self.lr)
+
+    def _get_lr_decay(self) -> float:
+        return float(self.lr_decay)
+
+
 # SieveGMM is kept as an alias of Sieve1 for backwards compatibility.
 SieveGMM = Sieve1
 
@@ -1938,6 +2024,8 @@ _ALGO_REGISTRY = {
     "sieve3": Sieve3,
     "sieve3_gmm": Sieve3,
     "gmmexp": GMMExp,
+    "ssgmm": SSGMM,
+    "ss_gmm": SSGMM,
 }
 
 

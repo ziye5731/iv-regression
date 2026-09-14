@@ -155,6 +155,19 @@ class SimulationConfig:
     gmmexp_reg: float = 1e-2              # ridge for weighting / preconditioner
     gmmexp_average: bool = True           # Polyak-Ruppert averaging
 
+    # --- SSGMM (fixed-setting Hermite sieve GMM) ---
+    # The only SSGMM choice is the Hermite degree set. Its remaining design
+    # choices are fixed in SSGMM: Newton-type preconditioning, W=I, a running
+    # past-Jacobian operator, and no iterate averaging. The scalar numerical
+    # hyperparameters below remain configurable.
+    ssgmm_basis: tuple = (0, 1, 2)
+    ssgmm_lr: float = 0.01
+    ssgmm_lr_decay: float = 0.5
+    ssgmm_B_M: int = 1
+    ssgmm_B_m: int = 1
+    ssgmm_reg: float = 1e-2
+    ssgmm_clip: float = 10.0
+
     # --- Training ---
     n_iterations: int = 100000
     verbose_every: int = 50000
@@ -186,4 +199,3 @@ class SimulationConfig:
     def d_theta(self) -> int:
         """Number of parameters (derived from model)."""
         return self.model.param_dim(self.d_x)
-

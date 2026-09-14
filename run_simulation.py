@@ -31,7 +31,7 @@ import numpy as np
 from iv_sim.config import SimulationConfig
 from iv_sim.data_generator import create_data_generator
 from iv_sim.dgp import get_dgp
-from iv_sim.algorithms import TOSGIVaR, FirstOrderSLIM, OTSGIVaR, DistanceCovOpt, DCOV3, DCOV4, Sieve1, Sieve2, Sieve3, GMMExp, get_algorithm, gmmexp_basis_token
+from iv_sim.algorithms import TOSGIVaR, FirstOrderSLIM, OTSGIVaR, DistanceCovOpt, DCOV3, DCOV4, Sieve1, Sieve2, Sieve3, GMMExp, SSGMM, get_algorithm, gmmexp_basis_token
 from iv_sim.metrics import aggregate_repeats
 from iv_sim.visualization import plot_comparison, plot_comparison_by_samples, print_summary_table, plot_comparison_mse_only, plot_h_star_vs_h
 
@@ -125,6 +125,18 @@ def build_simulation_config(cfg) -> SimulationConfig:
     config.gmmexp_clip = getattr(cfg, "ALGO_GMMEXP_CLIP", 10.0)
     config.gmmexp_reg = getattr(cfg, "ALGO_GMMEXP_REG", 1e-2)
     config.gmmexp_average = getattr(cfg, "ALGO_GMMEXP_AVERAGE", True)
+    _ssgmm_basis_cfg = getattr(cfg, "ALGO_SSGMM_BASIS", (0, 1, 2))
+    if (isinstance(_ssgmm_basis_cfg, (list, tuple)) and len(_ssgmm_basis_cfg) > 0
+            and all(isinstance(x, (int, np.integer)) for x in _ssgmm_basis_cfg)):
+        config.ssgmm_basis = tuple(sorted({int(x) for x in _ssgmm_basis_cfg}))
+    else:
+        config.ssgmm_basis = (0, 1, 2)  # grid run: per-run kwargs carry the set
+    config.ssgmm_lr = getattr(cfg, "ALGO_SSGMM_LR", 0.01)
+    config.ssgmm_lr_decay = getattr(cfg, "ALGO_SSGMM_LR_DECAY", 0.5)
+    config.ssgmm_B_M = getattr(cfg, "ALGO_SSGMM_B_M", 1)
+    config.ssgmm_B_m = getattr(cfg, "ALGO_SSGMM_B_m", 1)
+    config.ssgmm_reg = getattr(cfg, "ALGO_SSGMM_REG", 1e-2)
+    config.ssgmm_clip = getattr(cfg, "ALGO_SSGMM_CLIP", 10.0)
     # Re-trigger __post_init__ with corrected dimensions.
     # The first __post_init__ (from SimulationConfig()) ran with defaults;
     # reset auto-generated fields so they are regenerated with actual dims.
@@ -265,6 +277,27 @@ def _parse_gmmexp_configs(cfg) -> list[dict]:
     return combos
 
 
+def _parse_ssgmm_configs(cfg) -> list[dict]:
+    """Expand SSGMM Hermite degree sets into one run per basis.
+
+    SSGMM has no ablation cross-product: the Hermite degree set is its sole
+    configurable axis. Labels include the selected set so each run gets a
+    distinct result key, log, and green plotting colour.
+    """
+    bases = _normalise_gmmexp_bases(
+        getattr(cfg, "ALGO_SSGMM_BASIS", (0, 1, 2)))
+    configs = []
+    samples_per_step = (int(getattr(cfg, "ALGO_SSGMM_B_M", 1))
+                        + int(getattr(cfg, "ALGO_SSGMM_B_m", 1)))
+    for basis in bases:
+        label = f"ssgmm_{gmmexp_basis_token('herm', basis)}"
+        configs.append({"basis": basis, "label": label, "sp": samples_per_step})
+    labels = [c["label"] for c in configs]
+    if len(set(labels)) != len(labels):
+        raise ValueError(f"Duplicate SSGMM basis labels: {labels}")
+    return configs
+
+
 def run_single_experiment(
     config: SimulationConfig,
     algo_name: str,
@@ -345,6 +378,14 @@ def run_single_experiment(
         )
     elif algo_name.lower() in ("gmmexp", "gmm_exp"):
         algo = GMMExp(
+            config,
+            seed=seed + 1000,
+            init_theta=init_theta,
+            start_iter=config.start_iteration,
+            **(slim_kwargs or {}),
+        )
+    elif algo_name.lower() in ("ssgmm", "ss_gmm"):
+        algo = SSGMM(
             config,
             seed=seed + 1000,
             init_theta=init_theta,
@@ -498,6 +539,7 @@ def main():
     config = build_simulation_config(cfg)
     slim_configs = _parse_slim_configs(cfg)
     gmmexp_configs = _parse_gmmexp_configs(cfg)
+    ssgmm_configs = _parse_ssgmm_configs(cfg)
 
     # --- Resume logic ---
     resume_from = getattr(cfg, "RESUME_FROM", None)
@@ -564,6 +606,8 @@ def main():
     run_sieve2 = "sieve2" in algo_list or "all" in algo_list
     run_sieve3 = "sieve3" in algo_list or "all" in algo_list
     run_gmmexp = "gmmexp" in algo_list or "all" in algo_list
+    run_ssgmm = ("ssgmm" in algo_list or "ss_gmm" in algo_list
+                 or "all" in algo_list)
 
     # --- generic registered algorithms referenced directly in ALGO_LIST ----
     # (any get_algorithm()-registered name not handled above).  These are
@@ -574,6 +618,7 @@ def main():
         "slim", "first_order_slim",
         "sieve", "sieve1", "sievegmm", "sieve_gmm",
         "sieve2", "sieve2_gmm", "sieve3", "sieve3_gmm", "gmmexp",
+        "ssgmm", "ss_gmm",
     }
     extra_algos = []
     for _nm in algo_list:
@@ -609,6 +654,9 @@ def main():
     if run_gmmexp:
         for gc in gmmexp_configs:
             algo_names.append(gc["label"])
+    if run_ssgmm:
+        for sc in ssgmm_configs:
+            algo_names.append(sc["label"])
     algo_names.extend(extra_algos)
     print("=" * 60)
     print("  IV Regression Simulation")
@@ -712,6 +760,11 @@ def main():
                 kw = {k: v for k, v in gc.items() if k not in ("label", "sp")}
                 _calibrate_one(gc["label"], "gmmexp", kw)
                 calib_labels.append(gc["label"])
+        if run_ssgmm:
+            for sc in ssgmm_configs:
+                kw = {k: v for k, v in sc.items() if k not in ("label", "sp")}
+                _calibrate_one(sc["label"], "ssgmm", kw)
+                calib_labels.append(sc["label"])
         for _nm in extra_algos:
             _calibrate_one(_nm, _nm)
             calib_labels.append(_nm)
@@ -775,6 +828,7 @@ def main():
     if run_sieve2: total_runs += 1
     if run_sieve3: total_runs += 1
     if run_gmmexp: total_runs += len(gmmexp_configs)
+    if run_ssgmm: total_runs += len(ssgmm_configs)
     total_runs += len(extra_algos)
     if run_slim: total_runs += len(slim_configs)
     runs_done = 0
@@ -797,6 +851,9 @@ def main():
     if run_gmmexp:
         for gc in gmmexp_configs:
             algo_tasks.append((gc["label"], "gmmexp", gc))
+    if run_ssgmm:
+        for sc in ssgmm_configs:
+            algo_tasks.append((sc["label"], "ssgmm", sc))
     for _nm in extra_algos:
         algo_tasks.append((_nm, _nm, None))
     if run_slim:
@@ -870,6 +927,7 @@ def main():
 
     # Build samples_per_step map for same-samples plot
     gmmexp_sp = {gc["label"]: gc["sp"] for gc in gmmexp_configs}
+    ssgmm_sp = {sc["label"]: sc["sp"] for sc in ssgmm_configs}
     sp_map = {}
     for algo_name, results in all_results.items():
         if algo_name == "tosg":
@@ -895,6 +953,8 @@ def main():
             sp_map[algo_name] = bm_val + bm2_val
         elif algo_name in gmmexp_sp:
             sp_map[algo_name] = gmmexp_sp[algo_name]
+        elif algo_name in ssgmm_sp:
+            sp_map[algo_name] = ssgmm_sp[algo_name]
         else:
             # generic: ask the registered algorithm for its samples-per-step
             try:
