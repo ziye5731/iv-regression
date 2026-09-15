@@ -33,7 +33,7 @@ COLORS = {
     "sieve1": "#088122",
     "sieve2": "#B5FF35",
     "sieve3": "#00B0FF",     # light blue
-    "ssgmm": "#238B45",      # green (fixed-setting Hermite sieve GMM)
+    "ssgmm": "#007F5F",      # high-contrast green (fixed-setting Hermite sieve GMM)
     # SLIM default fallback
     "slim": "#2979FF",       # bright blue
     "first_order_slim": "#2979FF",
@@ -74,9 +74,17 @@ LABELS = {
 _GMMEXP_PALETTE = [plt.get_cmap("tab20")(i / 20.0) for i in range(18)]
 _gmmexp_variant_counter: dict[str, int] = {}
 
-# Green shades for SSGMM Hermite-degree variants.
+# High-contrast green family for SSGMM Hermite-degree variants.  This is
+# deliberately qualitative rather than a lightness-only sequential ramp: a
+# run with several basis sets must remain distinguishable after uncertainty
+# bands are overlaid and when curves cross.
 _SSGMM_PALETTE = [
-    "#006D2C", "#238B45", "#41AB5D", "#74C476", "#A1D99B", "#C7E9C0",
+    "#00441B",  # deep forest
+    "#007F5F",  # blue-green
+    "#00A651",  # saturated emerald
+    "#6B9E00",  # olive green
+    "#A6CE39",  # yellow-green
+    "#0B6E4F",  # dark teal-green
 ]
 _ssgmm_variant_counter: dict[str, int] = {}
 

@@ -15,7 +15,7 @@ This file is copied to the results directory for reproducibility.
 #        "quadratic-linear", "quadratic-sin", "logistic-tanh", "probit-relu".
 #        First stages: linear, quadratic, sin, tanh, relu, sigmoid, cubic.
 #        A plain name is the same as "<structural>-linear".
-DGP_MODE = "quadratic-linear"
+DGP_MODE = "quadratic-tanh"
 
 # --- tosg ---
 #   z     ~ N(0, I)
@@ -121,7 +121,7 @@ DGP_DEEPGMM_IV_STRENGTH = 1.0    # scales z1 coefficient (IV strength; larger â†
 # ============================================================================
 # 2. Algorithms
 # ============================================================================
-ALGO_LIST = ["ssgmm", "tosg", "otsg"]
+ALGO_LIST = ["ssgmm", "tosg"]
 
 # --- TOSG ---
 ALGO_TOSG_LR = 0.01
@@ -254,7 +254,7 @@ ALGO_SSGMM_CLIP = 10.0
 # 3. Other
 # ============================================================================
 SEED = 10
-N_ITERATIONS = int(5e6)
+N_ITERATIONS = int(1e7)
 N_REPEATS = 10
 VERBOSE_EVERY = int(1e5)
 HISTORY_EVERY = None          # record training history every N iterations
@@ -263,6 +263,6 @@ OUTDIR = None
 SAVE_PLOT = None
 X_AXIS_SCALE = "log"  # 'linear', 'log', 'symlog', 'asinh', 'logit', 'function', 'functionlog'
 
-N_JOBS = 3                         # parallel algos (> 1 uses multiprocessing)
+N_JOBS = 5                         # parallel algos (> 1 uses multiprocessing)
 EARLY_STOP_THRESHOLD = 0.0         # stop when param error change < this
 EARLY_STOP_PATIENCE = 0            # how many checks before stopping
